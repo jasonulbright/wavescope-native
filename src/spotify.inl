@@ -1,0 +1,339 @@
+// Spotify one-button: press it and Spotify starts playing, which the loopback
+// tap already visualizes. OAuth2 Authorization Code + PKCE (no client secret —
+// the right flow for a serverless native app): the browser authorizes once,
+// the redirect to http://127.0.0.1:8888/callback is caught on a raw socket,
+// and tokens are fetched over WinHTTP. The refresh token is DPAPI-encrypted
+// (tied to the Windows user) in spectraviz.ini, so re-auth is rare and the
+// stored token isn't portable or readable by other accounts.
+//
+// Playback control (the Player endpoints) is Spotify Premium-only; loopback
+// capture of whatever is already playing needs none of this.
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <winhttp.h>
+#include <bcrypt.h>
+#include <wincrypt.h>
+#include <string>
+#include <thread>
+#include <atomic>
+
+#pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "crypt32.lib")
+#pragma comment(lib, "ws2_32.lib")
+
+// ---- small encoding / crypto helpers (single TU, so file-static is fine) ----
+
+static std::wstring SpWiden(const std::string& s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring w(n > 0 ? n - 1 : 0, 0);
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
+    return w;
+}
+static std::string SpNarrow(const std::wstring& s) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string a(n > 0 ? n - 1 : 0, 0);
+    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, &a[0], n, nullptr, nullptr);
+    return a;
+}
+
+static std::string SpUrlEncode(const std::string& s) {
+    static const char* h = "0123456789ABCDEF";
+    std::string o;
+    for (unsigned char c : s) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') o += (char)c;
+        else { o += '%'; o += h[c >> 4]; o += h[c & 15]; }
+    }
+    return o;
+}
+static std::string SpUrlDecode(const std::string& s) {
+    auto hv = [](char c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; };
+    std::string o;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '%' && i + 2 < s.size()) { o += (char)((hv(s[i + 1]) << 4) | hv(s[i + 2])); i += 2; }
+        else if (s[i] == '+') o += ' ';
+        else o += s[i];
+    }
+    return o;
+}
+
+static std::string SpBase64Url(const BYTE* p, size_t n) {
+    static const char* t = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string o; int val = 0, bits = -6;
+    for (size_t i = 0; i < n; i++) {
+        val = (val << 8) + p[i]; bits += 8;
+        while (bits >= 0) { o += t[(val >> bits) & 0x3F]; bits -= 6; }
+    }
+    if (bits > -6) o += t[((val << 8) >> (bits + 8)) & 0x3F];
+    return o; // URL-safe, unpadded (RFC 7636)
+}
+static std::string SpHex(const BYTE* p, size_t n) {
+    static const char* h = "0123456789abcdef"; std::string o;
+    for (size_t i = 0; i < n; i++) { o += h[p[i] >> 4]; o += h[p[i] & 15]; }
+    return o;
+}
+static std::string SpUnHex(const std::string& s) {
+    auto hv = [](char c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; };
+    std::string o;
+    for (size_t i = 0; i + 1 < s.size(); i += 2) o += (char)((hv(s[i]) << 4) | hv(s[i + 1]));
+    return o;
+}
+
+static void SpSha256(const std::string& in, BYTE out[32]) {
+    BCRYPT_ALG_HANDLE alg = nullptr; BCRYPT_HASH_HANDLE h = nullptr;
+    BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
+    BCryptCreateHash(alg, &h, nullptr, 0, nullptr, 0, 0);
+    BCryptHashData(h, (PUCHAR)in.data(), (ULONG)in.size(), 0);
+    BCryptFinishHash(h, out, 32, 0);
+    BCryptDestroyHash(h); BCryptCloseAlgorithmProvider(alg, 0);
+}
+static std::string SpRandVerifier() {
+    BYTE b[48] = {};
+    BCryptGenRandom(nullptr, b, sizeof(b), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    return SpBase64Url(b, sizeof(b)); // 64 chars, within the 43-128 range
+}
+
+// ---- minimal HTTPS + JSON + localhost listener ----
+
+struct SpResp { DWORD status = 0; std::string body; };
+
+static SpResp SpHttps(const wchar_t* host, const wchar_t* verb, const wchar_t* path,
+                      const std::string& body, const std::string& ctype, const std::string& bearer) {
+    SpResp r;
+    HINTERNET s = WinHttpOpen(L"SpectraViz/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                              WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!s) return r;
+    HINTERNET c = WinHttpConnect(s, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
+    HINTERNET q = c ? WinHttpOpenRequest(c, verb, path, nullptr, WINHTTP_NO_REFERER,
+                                         WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
+    if (q) {
+        std::wstring hdr;
+        if (!ctype.empty())  hdr += L"Content-Type: " + SpWiden(ctype) + L"\r\n";
+        if (!bearer.empty()) hdr += L"Authorization: Bearer " + SpWiden(bearer) + L"\r\n";
+        BOOL ok = WinHttpSendRequest(q,
+            hdr.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : hdr.c_str(),
+            hdr.empty() ? 0 : (DWORD)-1L,
+            (LPVOID)(body.empty() ? nullptr : body.data()), (DWORD)body.size(), (DWORD)body.size(), 0);
+        if (ok && WinHttpReceiveResponse(q, nullptr)) {
+            DWORD sc = 0, l = sizeof(sc);
+            WinHttpQueryHeaders(q, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &sc, &l, WINHTTP_NO_HEADER_INDEX);
+            r.status = sc;
+            DWORD avail;
+            do {
+                avail = 0; WinHttpQueryDataAvailable(q, &avail);
+                if (avail) { std::string ch(avail, 0); DWORD rd = 0;
+                    WinHttpReadData(q, &ch[0], avail, &rd); ch.resize(rd); r.body += ch; }
+            } while (avail > 0);
+        }
+    }
+    if (q) WinHttpCloseHandle(q);
+    if (c) WinHttpCloseHandle(c);
+    if (s) WinHttpCloseHandle(s);
+    return r;
+}
+
+// Extract a JSON string/scalar value for `key` (flat scan; good enough here).
+static std::string SpJson(const std::string& j, const char* key) {
+    std::string k = std::string("\"") + key + "\"";
+    size_t p = j.find(k); if (p == std::string::npos) return "";
+    p = j.find(':', p + k.size()); if (p == std::string::npos) return "";
+    p++; while (p < j.size() && (j[p] == ' ' || j[p] == '\t')) p++;
+    if (p < j.size() && j[p] == '"') {
+        p++; std::string out;
+        while (p < j.size() && j[p] != '"') {
+            if (j[p] == '\\' && p + 1 < j.size()) { out += j[p + 1]; p += 2; }
+            else out += j[p++];
+        }
+        return out;
+    }
+    size_t e = p;
+    while (e < j.size() && j[e] != ',' && j[e] != '}' && j[e] != ']') e++;
+    return j.substr(p, e - p);
+}
+static std::string SpFirstDeviceId(const std::string& j) {
+    size_t d = j.find("\"devices\"");
+    size_t p = j.find("\"id\"", d == std::string::npos ? 0 : d);
+    if (p == std::string::npos) return "";
+    std::string id = SpJson(j.substr(p), "id");
+    return id == "null" ? "" : id;
+}
+
+static std::string SpQueryParam(const std::string& req, const char* key) {
+    std::string k = std::string(key) + "=";
+    size_t p = req.find('?'); if (p == std::string::npos) p = 0;
+    p = req.find(k, p); if (p == std::string::npos) return "";
+    p += k.size(); size_t e = p;
+    while (e < req.size() && req[e] != '&' && req[e] != ' ' && req[e] != '\r' &&
+           req[e] != '\n' && req[e] != '#') e++;
+    return SpUrlDecode(req.substr(p, e - p));
+}
+
+// Listen on 127.0.0.1:8888 for the OAuth redirect; return the auth code once
+// the browser hits it (validating the CSRF state). Times out after 3 minutes.
+static bool SpWaitForCode(std::string& code, const std::string& expectState) {
+    WSADATA w; if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false;
+    bool ok = false;
+    SOCKET srv = socket(AF_INET, SOCK_STREAM, 0);
+    if (srv != INVALID_SOCKET) {
+        BOOL yes = TRUE; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
+        sockaddr_in a = {}; a.sin_family = AF_INET; a.sin_port = htons(8888);
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        if (bind(srv, (sockaddr*)&a, sizeof(a)) == 0 && listen(srv, 1) == 0) {
+            fd_set rs; FD_ZERO(&rs); FD_SET(srv, &rs);
+            timeval tv = { 180, 0 };
+            if (select(0, &rs, nullptr, nullptr, &tv) > 0) {
+                SOCKET cS = accept(srv, nullptr, nullptr);
+                if (cS != INVALID_SOCKET) {
+                    char buf[4096]; int n = recv(cS, buf, sizeof(buf) - 1, 0);
+                    if (n > 0) {
+                        buf[n] = 0; std::string req(buf);
+                        code = SpQueryParam(req, "code");
+                        ok = !code.empty() && SpQueryParam(req, "state") == expectState;
+                    }
+                    const char* resp = ok
+                        ? "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+                          "<html><body style='font-family:Segoe UI,sans-serif;background:#0b0d0c;"
+                          "color:#e8eae8;text-align:center;padding-top:12%'><h2>SpectraViz connected</h2>"
+                          "<p>You can close this tab and return to the visualizer.</p></body></html>"
+                        : "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nSpectraViz auth failed.";
+                    send(cS, resp, (int)strlen(resp), 0);
+                    closesocket(cS);
+                }
+            }
+        }
+        closesocket(srv);
+    }
+    WSACleanup();
+    return ok;
+}
+
+// ---- the client ----
+
+struct SpotifyClient {
+    std::string clientId = "89df5ee986864e558952ba356aa968ea";
+    std::string redirect = "http://127.0.0.1:8888/callback";
+    std::string scopes   = "user-modify-playback-state user-read-playback-state user-read-currently-playing";
+    std::string accessToken, refreshToken;
+    std::atomic<bool> busy{ false };
+
+    std::wstring IniPath() const { return PmExeDir() + L"spectraviz.ini"; }
+
+    std::string Dpapi(const std::string& in, bool enc) {
+        DATA_BLOB i = { (DWORD)in.size(), (BYTE*)in.data() }, o = {};
+        BOOL ok = enc ? CryptProtectData(&i, L"SpectraViz", nullptr, nullptr, nullptr, 0, &o)
+                      : CryptUnprotectData(&i, nullptr, nullptr, nullptr, nullptr, 0, &o);
+        if (!ok) return "";
+        std::string r((char*)o.pbData, o.cbData);
+        LocalFree(o.pbData);
+        return r;
+    }
+    void SaveToken() {
+        if (refreshToken.empty()) return;
+        std::string blob = Dpapi(refreshToken, true);
+        std::wstring hx = SpWiden(SpHex((const BYTE*)blob.data(), blob.size()));
+        WritePrivateProfileStringW(L"spotify", L"refresh", hx.c_str(), IniPath().c_str());
+    }
+    void LoadToken() {
+        wchar_t buf[4096];
+        GetPrivateProfileStringW(L"spotify", L"refresh", L"", buf, 4096, IniPath().c_str());
+        if (buf[0]) refreshToken = Dpapi(SpUnHex(SpNarrow(buf)), false);
+    }
+
+    void Notify(const std::wstring& m) {
+        MessageBoxW(nullptr, m.c_str(), L"SpectraViz \x2014 Spotify",
+                    MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
+    }
+
+    SpResp Player(const wchar_t* verb, const wchar_t* path, const std::string& body) {
+        return SpHttps(L"api.spotify.com", verb, path, body,
+                       body.empty() ? "" : "application/json", accessToken);
+    }
+
+    bool RefreshAccess() {
+        if (refreshToken.empty()) return false;
+        std::string body = "grant_type=refresh_token&refresh_token=" + refreshToken +
+                           "&client_id=" + clientId;
+        SpResp r = SpHttps(L"accounts.spotify.com", L"POST", L"/api/token", body,
+                           "application/x-www-form-urlencoded", "");
+        if (r.status != 200) return false;
+        accessToken = SpJson(r.body, "access_token");
+        std::string nr = SpJson(r.body, "refresh_token");
+        if (!nr.empty()) { refreshToken = nr; SaveToken(); }
+        return !accessToken.empty();
+    }
+
+    bool DoPkceAuth() {
+        std::string verifier = SpRandVerifier();
+        BYTE hash[32]; SpSha256(verifier, hash);
+        std::string challenge = SpBase64Url(hash, 32);
+        std::string state = SpRandVerifier().substr(0, 16);
+        std::string url = "https://accounts.spotify.com/authorize?client_id=" + clientId +
+            "&response_type=code&redirect_uri=" + SpUrlEncode(redirect) +
+            "&code_challenge_method=S256&code_challenge=" + challenge +
+            "&scope=" + SpUrlEncode(scopes) + "&state=" + state;
+        ShellExecuteW(nullptr, L"open", SpWiden(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+
+        std::string code;
+        if (!SpWaitForCode(code, state)) return false;
+        std::string body = "grant_type=authorization_code&code=" + code +
+            "&redirect_uri=" + SpUrlEncode(redirect) + "&client_id=" + clientId +
+            "&code_verifier=" + verifier;
+        SpResp r = SpHttps(L"accounts.spotify.com", L"POST", L"/api/token", body,
+                           "application/x-www-form-urlencoded", "");
+        if (r.status != 200) return false;
+        accessToken = SpJson(r.body, "access_token");
+        refreshToken = SpJson(r.body, "refresh_token");
+        SaveToken();
+        return !accessToken.empty();
+    }
+
+    bool EnsureToken() {
+        if (!accessToken.empty()) return true;
+        if (RefreshAccess()) return true;
+        return DoPkceAuth();
+    }
+
+    bool StartPlayback() {
+        SpResp dev = Player(L"GET", L"/v1/me/player/devices", "");
+        if (dev.status == 401 && (RefreshAccess() || DoPkceAuth()))
+            dev = Player(L"GET", L"/v1/me/player/devices", "");
+        if (dev.status != 200) {
+            Notify(L"Couldn't reach Spotify. Playback control needs a Premium account.");
+            return false;
+        }
+        std::string id = SpFirstDeviceId(dev.body);
+        if (id.empty()) {
+            Notify(L"No Spotify device is available.\n\nOpen Spotify on this PC (or your phone), "
+                   L"play any track once, then press the button again.");
+            return false;
+        }
+        // Transfer to the device with play:true = select it and start playing.
+        std::string body = "{\"device_ids\":[\"" + id + "\"],\"play\":true}";
+        SpResp pr = Player(L"PUT", L"/v1/me/player", body);
+        if (pr.status == 401 && RefreshAccess()) pr = Player(L"PUT", L"/v1/me/player", body);
+        if (pr.status == 204 || pr.status == 202 || pr.status == 200) return true; // playing
+        if (pr.status == 403) {
+            Notify(L"Spotify refused playback control.\nThis feature requires Spotify Premium.");
+            return false;
+        }
+        Notify(L"Spotify playback couldn't start (HTTP " + std::to_wstring(pr.status) + L").");
+        return false;
+    }
+
+    void Flow() {
+        if (!EnsureToken()) { Notify(L"Spotify sign-in didn't complete. Try the button again."); return; }
+        StartPlayback(); // notifies on the device/premium cases; silent on success
+    }
+
+    // The one button — runs the whole flow on a worker thread so the render
+    // loop never stalls waiting on the browser or the network.
+    void OneButton() {
+        if (busy.exchange(true)) return;
+        std::thread([this] { Flow(); busy = false; }).detach();
+    }
+};
+
+static SpotifyClient g_spotify;
