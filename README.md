@@ -55,8 +55,8 @@ Keys: `SPACE`/`RIGHT` next (mode or preset), `LEFT` prev, `P` palette,
 `N` new custom palette (color picker), `1`/`2`/`3` source (loopback/mic/demo),
 `4` open audio file, `S` shuffle timer, `C` calm mode, `R` resolution target,
 `L` MilkDrop preset folder, `M` MilkDrop engine, `G` GPU shader engine,
-`F` fullscreen, `H` HUD, `ESC` quit. Settings and custom palettes persist to
-`spectraviz.ini`.
+`B` Spotify (authorize + play), `F` fullscreen, `H` HUD, `ESC` quit. Settings
+and custom palettes persist to `spectraviz.ini`.
 
 Launch flags: `demo` (synthetic signal), `file=<path>` (play a file),
 `milkdrop` / `shader` (boot into that engine), `wall` (borderless video wall
@@ -87,7 +87,7 @@ feature:
 | Demo signal source | done (key 3, or `SpectraViz demo`) |
 | Microphone source | done (key 2) |
 | Audio-file source | done (key 4, Media Foundation decode + play) |
-| **Spotify (quick + PKCE)** | MISSING |
+| Spotify one-button (PKCE) | done (B / SPOT: authorize once, then play) |
 | Resolution targets (1080-8K) | done (key R; offscreen render + scale) |
 | Shuffle timer | done for modes (key S); palette-shuffle + include list with the deck |
 | Calm mode (photosensitivity) | done (key C) |
@@ -148,8 +148,17 @@ feature:
    still drives them — extending the deck over them is a follow-up). Still to
    do: the palette-shuffle include list + full color-stop palette editor,
    which the deck will host.
-8. **Spotify.** WinHTTP PKCE with a localhost redirect for the connected
-   one-button mode; capture stays via loopback.
+8. ~~**Spotify.**~~ DONE (`src/spotify.inl`). `B` (or the `SPOT` deck button)
+   runs OAuth2 Authorization Code + **PKCE** — no client secret, so nothing
+   sensitive ships in the exe. The browser authorizes once; the redirect to
+   `http://127.0.0.1:8888/callback` is caught on a raw socket (CSRF `state`
+   validated), tokens are fetched over WinHTTP, and the Player API starts
+   playback on your device — which the loopback tap already visualizes. The
+   refresh token is **DPAPI-encrypted** (bound to the Windows user) in
+   `spectraviz.ini`, so re-auth is rare. The whole flow runs on a worker
+   thread; the render loop never stalls. *Playback control needs Spotify
+   Premium (the Player endpoints are Premium-only); loopback capture of
+   whatever is already playing needs none of this.*
 9. ~~**Polish.**~~ DONE. System-tray icon (right-click → Show / Hide / Quit;
    minimize hides to tray), `kiosk` flag (borderless full-screen on the
    primary display + idle cursor auto-hide), `install-startup` /

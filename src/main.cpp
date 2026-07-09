@@ -476,6 +476,7 @@ static float BinLog(const AudioFrame& f, float pos) {
 // The projectM (MilkDrop) engine host: child GL window + libprojectM.
 #include "projectm_host.inl"
 #include "shader_host.inl"
+#include "spotify.inl"
 
 // --------------------------------------------------------------------- app
 
@@ -681,7 +682,7 @@ struct App {
         if (hud && hudFont) {
             wchar_t text[360];
             static const wchar_t* shuf[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
-            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  N new-palette  1-4 source  R res  S shuffle  C calm  M milkdrop  G shader  F full  H hud  F1 help  ESC",
+            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  N new-palette  1-4 source  R res  S shuffle  C calm  M milkdrop  G shader  B spotify  F full  H hud  F1 help  ESC",
                        modeIdx + 1, MODE_COUNT, mode.name, PaletteName(), tap.SourceName(),
                        RES_OPTS[resIdx].name, offW, offH, shuf[shuffleIdx], calm ? L"  CALM" : L"", fps, frame.level);
             brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.75f));
@@ -711,12 +712,12 @@ struct App {
     // GL engines (projectM/GPU) the child window covers this D2D bar, so the
     // deck is a built-in-mode surface; keyboard still drives every engine.
     enum { DK_SYS, DK_MIC, DK_DEMO, DK_FILE, DK_MODES, DK_MILK, DK_GPU,
-           DK_PREV, DK_NEXT, DK_PAL, DK_RES, DK_SHUF, DK_CALM, DK_HUD, DK_N };
+           DK_PREV, DK_NEXT, DK_PAL, DK_RES, DK_SHUF, DK_CALM, DK_HUD, DK_SPOT, DK_N };
 
     static const wchar_t* DeckLabel(int i) {
         static const wchar_t* L_[DK_N] = {
             L"SYS", L"MIC", L"DEMO", L"FILE", L"MODES", L"MILK", L"GPU",
-            L"\x2039", L"\x203A", L"PAL", L"RES", L"SHUF", L"CALM", L"HUD" };
+            L"\x2039", L"\x203A", L"PAL", L"RES", L"SHUF", L"CALM", L"HUD", L"SPOT" };
         return L_[i];
     }
 
@@ -753,6 +754,7 @@ struct App {
         case DK_SHUF:  return shuffleIdx > 0;
         case DK_CALM:  return calm;
         case DK_HUD:   return hud;
+        case DK_SPOT:  return g_spotify.busy.load();
         default:       return false;
         }
     }
@@ -773,6 +775,7 @@ struct App {
         case DK_SHUF:  CycleShuffle(); break;
         case DK_CALM:  SetCalm(!calm); break;
         case DK_HUD:   hud = !hud; break;
+        case DK_SPOT:  g_spotify.OneButton(); break;
         }
     }
 
@@ -823,6 +826,7 @@ struct App {
             L"4              open an audio file\n"
             L"M              MilkDrop engine (projectM)\n"
             L"G              GPU shader engine\n"
+            L"B              Spotify: authorize + start playback (Premium)\n"
             L"S              shuffle timer (off / 15s / 30s / 1m / 5m)\n"
             L"C              calm mode (photosensitive-safe)\n"
             L"R              resolution (AUTO / 1080 / 1440 / 4K / 8K)\n"
@@ -832,7 +836,7 @@ struct App {
             L"\n"
             L"Launch: SpectraViz.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
             L"        [install-startup | remove-startup]   \x2014   tray icon: right-click";
-        float w = 600, h = 424;
+        float w = 620, h = 448;
         float x = (size.width - w) * 0.5f, y = (size.height - h) * 0.5f;
         if (x < 0) x = 0; if (y < 0) y = 0;
         D2D1_ROUNDED_RECT card = { D2D1::RectF(x, y, x + w, y + h), 10, 10 };
@@ -1204,6 +1208,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'L':      a->OpenPresetFolder(); break;
         case 'M':      a->ToggleProjectM(); break;
         case 'G':      a->ToggleShader(); break;
+        case 'B':      g_spotify.OneButton(); break;  // Spotify: authorize + play
         case 'F':      a->ToggleFullscreen(); break;
         case 'H':      a->hud = !a->hud; break;
         case VK_F1:    a->help = !a->help; break;
@@ -1276,6 +1281,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
     // Explicit launch-at-login toggles (user runs these deliberately).
     if (pCmdLine && wcsstr(pCmdLine, L"install-startup")) { SetAutoStart(true);  return 0; }
     if (pCmdLine && wcsstr(pCmdLine, L"remove-startup"))  { SetAutoStart(false); return 0; }
+
+    g_spotify.LoadToken(); // restore the DPAPI-encrypted Spotify refresh token
 
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WndProc;
