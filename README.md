@@ -91,7 +91,7 @@ feature:
 | projectM preset library | done (scans a folder of .milk; L picks your archive) |
 | GPU shader modes (plasma/tunnel/fractal) | done (G: real GLSL fragment shaders on the GL context) |
 | Multi-monitor (per-display windows) | done (`wall` flag: independent visual per screen) |
-| **On-screen control deck (auto-hiding)** | MISSING |
+| On-screen control deck (auto-hiding) | done (mouse bottom-bar; built-in view) |
 | Shortcuts / help overlay | done (F1 / ? keymap card; built-in-mode view) |
 | Landing / marketing page | N/A (desktop app) |
 | Reduced-motion fallback | N/A (desktop) |
@@ -134,11 +134,15 @@ feature:
    Without the flag it stays a single 1440×900 window as before. *Per-monitor
    config persistence is a later refinement — today the primary window's setup
    is what's saved.*
-7. **On-screen control deck.** *Help overlay DONE* — `F1` / `?` shows a
-   centered keymap card over the built-in modes. Still to do: an auto-hiding,
-   mouse-driven instrument deck (source, engine, mode, preset, palette,
-   resolution, shuffle) custom-drawn in the same pipeline, which also unlocks
-   the palette-shuffle include list + full color-stop palette editor.
+7. **On-screen control deck.** *Help overlay + auto-hiding deck DONE.* `F1` /
+   `?` shows a centered keymap card. The mouse-driven bottom bar reveals when
+   the cursor nears the bottom edge and auto-hides when idle: clickable
+   buttons for source (SYS/MIC/DEMO/FILE), engine (MODES/MILK/GPU), prev/next,
+   palette, resolution, shuffle, calm, HUD — active selections highlighted.
+   It's a built-in-mode surface (the GL engines cover the D2D layer; keyboard
+   still drives them — extending the deck over them is a follow-up). Still to
+   do: the palette-shuffle include list + full color-stop palette editor,
+   which the deck will host.
 8. **Spotify.** WinHTTP PKCE with a localhost redirect for the connected
    one-button mode; capture stays via loopback.
 9. **Polish.** Tray icon, launch-at-login / kiosk flag, preset hot-reload.

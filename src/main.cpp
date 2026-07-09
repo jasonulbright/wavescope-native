@@ -499,6 +499,7 @@ struct App {
     ID2D1SolidColorBrush* brush = nullptr;
     IDWriteFactory* dwrite = nullptr;
     IDWriteTextFormat* hudFont = nullptr;
+    IDWriteTextFormat* deckFont = nullptr;   // centered, for deck buttons
     AudioTap tap;
     HINSTANCE inst = nullptr;
     ProjectMHost pmHost;
@@ -518,6 +519,9 @@ struct App {
     float lastShuffle = 0;
     bool hud = true;
     bool help = false;       // F1 / ? full keymap overlay
+    bool deckVisible = false;// auto-hiding bottom control bar
+    int deckHover = -1;      // button under the cursor, or -1
+    float deckActivity = 0;  // last time the deck was touched (for auto-hide)
     bool fullscreen = false;
     WINDOWPLACEMENT savedPlacement = { sizeof(WINDOWPLACEMENT) };
     LARGE_INTEGER qpcFreq = {}, qpcStart = {};
@@ -538,6 +542,13 @@ struct App {
         dwrite->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                  14.0f, L"en-us", &hudFont);
+        dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                 13.0f, L"en-us", &deckFont);
+        if (deckFont) {
+            deckFont->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            deckFont->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
         return CreateTarget();
     }
 
@@ -675,6 +686,10 @@ struct App {
                           D2D1::RectF(16, 12, size.width - 16, 80), brush);
         }
 
+        if (deckVisible && deckFont) {
+            if (Now() - deckActivity > 2.5f) { deckVisible = false; deckHover = -1; }
+            else DrawDeck(size);
+        }
         if (help && hudFont) DrawHelp(size);
 
         HRESULT hr = rt->EndDraw();
@@ -685,6 +700,110 @@ struct App {
             fps = fpsFrames;
             fpsFrames = 0;
             fpsWindowStart = now;
+        }
+    }
+
+    // ----- auto-hiding control deck (bottom bar, built-in-mode view) -----
+    // Clicking a button runs the same action as its keyboard shortcut. In the
+    // GL engines (projectM/GPU) the child window covers this D2D bar, so the
+    // deck is a built-in-mode surface; keyboard still drives every engine.
+    enum { DK_SYS, DK_MIC, DK_DEMO, DK_FILE, DK_MODES, DK_MILK, DK_GPU,
+           DK_PREV, DK_NEXT, DK_PAL, DK_RES, DK_SHUF, DK_CALM, DK_HUD, DK_N };
+
+    static const wchar_t* DeckLabel(int i) {
+        static const wchar_t* L_[DK_N] = {
+            L"SYS", L"MIC", L"DEMO", L"FILE", L"MODES", L"MILK", L"GPU",
+            L"\x2039", L"\x203A", L"PAL", L"RES", L"SHUF", L"CALM", L"HUD" };
+        return L_[i];
+    }
+
+    // Fill `out` with each button's rect and return the bar background rect.
+    D2D1_RECT_F DeckLayout(D2D1_SIZE_F size, D2D1_RECT_F out[DK_N]) {
+        const float margin = 20, barH = 50, gap = 5, bottom = 14;
+        float x0 = margin, x1 = size.width - margin;
+        float y0 = size.height - barH - bottom, y1 = y0 + barH;
+        float bw = (x1 - x0 - gap * (int)(DK_N - 1)) / (float)DK_N;
+        for (int i = 0; i < DK_N; i++) {
+            float bx = x0 + i * (bw + gap);
+            out[i] = D2D1::RectF(bx, y0, bx + bw, y1);
+        }
+        return D2D1::RectF(x0 - 8, y0 - 8, x1 + 8, y1 + 8);
+    }
+
+    int DeckHitTest(int mx, int my) {
+        if (!rt) return -1;
+        D2D1_SIZE_F size = rt->GetSize();
+        D2D1_RECT_F b[DK_N];
+        DeckLayout(size, b);
+        for (int i = 0; i < DK_N; i++)
+            if (mx >= b[i].left && mx <= b[i].right && my >= b[i].top && my <= b[i].bottom)
+                return i;
+        return -1;
+    }
+
+    // Is a button currently the active selection (for highlight)?
+    bool DeckActive(int i) {
+        switch (i) {
+        case DK_MODES: return !pmActive && !shaderActive;
+        case DK_MILK:  return pmActive;
+        case DK_GPU:   return shaderActive;
+        case DK_SHUF:  return shuffleIdx > 0;
+        case DK_CALM:  return calm;
+        case DK_HUD:   return hud;
+        default:       return false;
+        }
+    }
+
+    void DeckDispatch(int i) {
+        switch (i) {
+        case DK_SYS:   tap.SetSource(AudioTap::SRC_LOOPBACK); break;
+        case DK_MIC:   tap.SetSource(AudioTap::SRC_MIC); break;
+        case DK_DEMO:  tap.SetSource(AudioTap::SRC_DEMO); break;
+        case DK_FILE:  OpenFile(); break;
+        case DK_MODES: if (pmActive) ToggleProjectM(); else if (shaderActive) ToggleShader(); break;
+        case DK_MILK:  if (!pmActive) ToggleProjectM(); break;
+        case DK_GPU:   if (!shaderActive) ToggleShader(); break;
+        case DK_PREV:  CycleMode(-1); break;
+        case DK_NEXT:  CycleMode(1); break;
+        case DK_PAL:   CyclePalette(); break;
+        case DK_RES:   resIdx = (resIdx + 1) % RES_COUNT; break;
+        case DK_SHUF:  CycleShuffle(); break;
+        case DK_CALM:  SetCalm(!calm); break;
+        case DK_HUD:   hud = !hud; break;
+        }
+    }
+
+    // Mouse near the bottom edge reveals the deck; hovering keeps it alive.
+    void OnMouseMove(int mx, int my) {
+        RECT rc; GetClientRect(hwnd, &rc);
+        int hit = DeckHitTest(mx, my);
+        if (my > rc.bottom - 110 || hit >= 0) { deckVisible = true; deckActivity = Now(); }
+        deckHover = deckVisible ? hit : -1;
+    }
+
+    void OnClick(int mx, int my) {
+        if (!deckVisible) return;
+        int hit = DeckHitTest(mx, my);
+        if (hit >= 0) { DeckDispatch(hit); deckActivity = Now(); }
+    }
+
+    void DrawDeck(D2D1_SIZE_F size) {
+        D2D1_RECT_F b[DK_N];
+        D2D1_RECT_F bar = DeckLayout(size, b);
+        D2D1_ROUNDED_RECT barR = { bar, 10, 10 };
+        brush->SetColor(D2D1::ColorF(0.03f, 0.04f, 0.04f, 0.86f));
+        rt->FillRoundedRectangle(barR, brush);
+        for (int i = 0; i < DK_N; i++) {
+            D2D1_ROUNDED_RECT br = { b[i], 6, 6 };
+            bool active = DeckActive(i), hover = (i == deckHover);
+            if (active)      brush->SetColor(D2D1::ColorF(0.20f, 0.42f, 0.72f, 0.95f));
+            else if (hover)  brush->SetColor(D2D1::ColorF(0.16f, 0.19f, 0.22f, 0.95f));
+            else             brush->SetColor(D2D1::ColorF(0.09f, 0.11f, 0.12f, 0.90f));
+            rt->FillRoundedRectangle(br, brush);
+            brush->SetColor(active ? D2D1::ColorF(1, 1, 1, 0.98f)
+                                   : D2D1::ColorF(0.86f, 0.88f, 0.88f, 0.92f));
+            const wchar_t* lbl = DeckLabel(i);
+            rt->DrawTextW(lbl, (UINT32)wcslen(lbl), deckFont, b[i], brush);
         }
     }
 
@@ -956,6 +1075,7 @@ struct App {
         ReleaseOffscreen();
         SafeRelease(&brush);
         SafeRelease(&rt);
+        SafeRelease(&deckFont);
         SafeRelease(&hudFont);
         SafeRelease(&dwrite);
         SafeRelease(&d2d);
@@ -986,6 +1106,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (a->rt) a->rt->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
         if (a->pmHost.ready) a->pmHost.Resize(LOWORD(lp), HIWORD(lp));
         if (a->shaderHost.ready) a->shaderHost.Resize(LOWORD(lp), HIWORD(lp));
+        return 0;
+    case WM_MOUSEMOVE:
+        a->OnMouseMove((short)LOWORD(lp), (short)HIWORD(lp));
+        return 0;
+    case WM_LBUTTONDOWN:
+        a->OnClick((short)LOWORD(lp), (short)HIWORD(lp));
         return 0;
     case WM_KEYDOWN:
         switch (wp) {
