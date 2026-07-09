@@ -593,15 +593,19 @@ struct App {
 
         // projectM engine: render OpenGL on the child window instead of D2D.
         if (pmActive && pmHost.ready) {
-            pmHost.RenderFrame(frame);
-            fpsFrames++;
-            if (now - fpsWindowStart >= 1.0f) {
-                fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now;
-                wchar_t title[256];
-                swprintf_s(title, L"SpectraViz  projectM  %s  (%d presets, %d fps)  M exit  SPACE next  L folder",
-                           pmHost.PresetName(), pmHost.PresetCount(), fps);
-                SetWindowTextW(hwnd, title);
+            char l1[256] = {}, l2[256] = {};
+            if (hud) {
+                char preset[160] = {}, src[32] = {};
+                WideCharToMultiByte(CP_ACP, 0, pmHost.PresetName(), -1, preset, sizeof(preset), nullptr, nullptr);
+                WideCharToMultiByte(CP_ACP, 0, tap.SourceName(), -1, src, sizeof(src), nullptr, nullptr);
+                static const char* shuf[] = { "off", "15s", "30s", "1m", "5m" };
+                _snprintf_s(l1, _TRUNCATE, "SPECTRAVIZ  projectM  %s  (%d presets)  SRC %s  SHUF %s  FPS %d",
+                            preset, pmHost.PresetCount(), src, shuf[shuffleIdx], fps);
+                _snprintf_s(l2, _TRUNCATE, "SPACE/arrows preset  L folder  1 sys  2 mic  3 demo  4 file  S shuffle  M exit  F full  H hud");
             }
+            pmHost.RenderFrame(frame, hud ? l1 : nullptr, hud ? l2 : nullptr);
+            fpsFrames++;
+            if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
             return;
         }
 
