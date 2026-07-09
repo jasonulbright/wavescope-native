@@ -910,47 +910,74 @@ struct App {
         calm = GetPrivateProfileIntW(L"settings", L"calm", 0, path.c_str()) != 0;
         shaderIdx = Clampi(GetPrivateProfileIntW(L"settings", L"shader", 0, path.c_str()), 0, SV_COUNT - 1);
     }
+
+    // Release everything this window owns (GL hosts, audio tap, D2D).
+    void Shutdown() {
+        shaderHost.Destroy();
+        pmHost.Destroy();
+        tap.Stop();
+        ReleaseOffscreen();
+        SafeRelease(&brush);
+        SafeRelease(&rt);
+        SafeRelease(&hudFont);
+        SafeRelease(&dwrite);
+        SafeRelease(&d2d);
+    }
 };
 
-static App g_app;
+// One App per display, heap-allocated so the pointers stashed in each window
+// (GWLP_USERDATA) stay valid regardless of vector growth.
+static std::vector<App*> g_views;
+
+// The App that owns a given window, stashed at creation in GWLP_USERDATA.
+static App* AppFromHwnd(HWND h) {
+    return (App*)GetWindowLongPtrW(h, GWLP_USERDATA);
+}
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_NCCREATE) {
+        // Bind the App* passed as CreateWindow's lpParam to this window.
+        CREATESTRUCTW* cs = (CREATESTRUCTW*)lp;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)cs->lpCreateParams);
+        return DefWindowProc(hwnd, msg, wp, lp);
+    }
+    App* a = AppFromHwnd(hwnd);
+    if (!a) return DefWindowProc(hwnd, msg, wp, lp);
+
     switch (msg) {
     case WM_SIZE:
-        if (g_app.rt) {
-            g_app.rt->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
-        }
-        if (g_app.pmHost.ready) g_app.pmHost.Resize(LOWORD(lp), HIWORD(lp));
-        if (g_app.shaderHost.ready) g_app.shaderHost.Resize(LOWORD(lp), HIWORD(lp));
+        if (a->rt) a->rt->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
+        if (a->pmHost.ready) a->pmHost.Resize(LOWORD(lp), HIWORD(lp));
+        if (a->shaderHost.ready) a->shaderHost.Resize(LOWORD(lp), HIWORD(lp));
         return 0;
     case WM_KEYDOWN:
         switch (wp) {
         case VK_SPACE:
         case VK_RIGHT:
-            if (g_app.pmActive) g_app.pmHost.NextPreset(1);
-            else if (g_app.shaderActive) g_app.shaderIdx = (g_app.shaderIdx + 1) % g_app.shaderHost.ShaderCount();
-            else g_app.CycleMode(1);
+            if (a->pmActive) a->pmHost.NextPreset(1);
+            else if (a->shaderActive) a->shaderIdx = (a->shaderIdx + 1) % a->shaderHost.ShaderCount();
+            else a->CycleMode(1);
             break;
         case VK_LEFT:
-            if (g_app.pmActive) g_app.pmHost.NextPreset(-1);
-            else if (g_app.shaderActive) g_app.shaderIdx = (g_app.shaderIdx + g_app.shaderHost.ShaderCount() - 1) % g_app.shaderHost.ShaderCount();
-            else g_app.CycleMode(-1);
+            if (a->pmActive) a->pmHost.NextPreset(-1);
+            else if (a->shaderActive) a->shaderIdx = (a->shaderIdx + a->shaderHost.ShaderCount() - 1) % a->shaderHost.ShaderCount();
+            else a->CycleMode(-1);
             break;
-        case 'P':      g_app.CyclePalette(); break;
-        case 'N':      g_app.NewPalette(); break;
-        case '1':      g_app.tap.SetSource(AudioTap::SRC_LOOPBACK); break;
-        case '2':      g_app.tap.SetSource(AudioTap::SRC_MIC); break;
-        case '3':      g_app.tap.SetSource(AudioTap::SRC_DEMO); break;
-        case '4':      g_app.OpenFile(); break;
-        case 'S':      g_app.CycleShuffle(); break;
-        case 'C':      g_app.SetCalm(!g_app.calm); break;
-        case 'R':      g_app.resIdx = (g_app.resIdx + 1) % RES_COUNT; break;
-        case 'L':      g_app.OpenPresetFolder(); break;
-        case 'M':      g_app.ToggleProjectM(); break;
-        case 'G':      g_app.ToggleShader(); break;
-        case 'F':      g_app.ToggleFullscreen(); break;
-        case 'H':      g_app.hud = !g_app.hud; break;
-        case VK_ESCAPE: PostQuitMessage(0); break;
+        case 'P':      a->CyclePalette(); break;
+        case 'N':      a->NewPalette(); break;
+        case '1':      a->tap.SetSource(AudioTap::SRC_LOOPBACK); break;
+        case '2':      a->tap.SetSource(AudioTap::SRC_MIC); break;
+        case '3':      a->tap.SetSource(AudioTap::SRC_DEMO); break;
+        case '4':      a->OpenFile(); break;
+        case 'S':      a->CycleShuffle(); break;
+        case 'C':      a->SetCalm(!a->calm); break;
+        case 'R':      a->resIdx = (a->resIdx + 1) % RES_COUNT; break;
+        case 'L':      a->OpenPresetFolder(); break;
+        case 'M':      a->ToggleProjectM(); break;
+        case 'G':      a->ToggleShader(); break;
+        case 'F':      a->ToggleFullscreen(); break;
+        case 'H':      a->hud = !a->hud; break;
+        case VK_ESCAPE: PostQuitMessage(0); break;  // ESC on any window quits all
         }
         return 0;
     case WM_DESTROY:
@@ -960,11 +987,35 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
+// Create one App-backed window. `rc` is the target rect; borderless => a
+// popup filling that monitor (video-wall mode), else a normal 1440x900 window.
+static App* CreateView(HINSTANCE inst, const wchar_t* cls, RECT rc, bool borderless, int nCmdShow) {
+    App* v = new App();
+    v->inst = inst;
+    QueryPerformanceFrequency(&v->qpcFreq);
+    QueryPerformanceCounter(&v->qpcStart);
+    DWORD style = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
+    v->hwnd = CreateWindowExW(0, cls, L"SpectraViz", style,
+                              rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+                              nullptr, nullptr, inst, v);
+    if (!v->hwnd || !v->CreateGraphics()) { delete v; return nullptr; }
+    v->tap.Start();
+    v->LoadConfig();
+    ShowWindow(v->hwnd, borderless ? SW_SHOW : nCmdShow);
+    g_views.push_back(v);
+    return v;
+}
+
+// Collect each display's bounding rect for the video wall.
+static BOOL CALLBACK CollectMonitor(HMONITOR mon, HDC, LPRECT, LPARAM lp) {
+    auto* rects = (std::vector<RECT>*)lp;
+    MONITORINFO mi = { sizeof(MONITORINFO) };
+    if (GetMonitorInfoW(mon, &mi)) rects->push_back(mi.rcMonitor);
+    return TRUE;
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
-    g_app.inst = hInstance;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // UI-thread shell dialogs
-    QueryPerformanceFrequency(&g_app.qpcFreq);
-    QueryPerformanceCounter(&g_app.qpcStart);
 
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WndProc;
@@ -973,26 +1024,38 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
     wc.lpszClassName = L"SpectraVizWindow";
     RegisterClassW(&wc);
 
-    g_app.hwnd = CreateWindowExW(0, wc.lpszClassName, L"SpectraViz",
-                                 WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-                                 1440, 900, nullptr, nullptr, hInstance, nullptr);
-    if (!g_app.hwnd) return 1;
+    // "wall" spreads one borderless window across every display (video wall,
+    // independent visuals per screen). Otherwise a single 1440x900 window.
+    bool wall = pCmdLine && wcsstr(pCmdLine, L"wall");
+    std::vector<RECT> monitors;
+    if (wall) {
+        EnumDisplayMonitors(nullptr, nullptr, CollectMonitor, (LPARAM)&monitors);
+    }
+    if (monitors.empty()) monitors.push_back(RECT{ CW_USEDEFAULT, CW_USEDEFAULT,
+                                                   CW_USEDEFAULT + 1440, CW_USEDEFAULT + 900 });
 
-    if (!g_app.CreateGraphics()) return 1;
-    g_app.tap.Start();
-    g_app.LoadConfig(); // restore mode/palette/resolution/shuffle/calm + custom palettes
+    for (size_t i = 0; i < monitors.size(); i++) {
+        App* v = CreateView(hInstance, wc.lpszClassName, monitors[i], wall, nCmdShow);
+        if (!v) { if (i == 0) return 1; else continue; }
+        // Video wall: give each extra screen a distinct starting visual.
+        if (wall && i > 0) {
+            v->modeIdx = (v->modeIdx + (int)i * 5) % MODE_COUNT;
+            v->paletteIdx = (v->paletteIdx + (int)i) % v->PaletteCount();
+        }
+    }
+    if (g_views.empty()) return 1;
 
-    ShowWindow(g_app.hwnd, nCmdShow);
+    // Command-line, applied to every window: "demo" synthetic signal,
+    // "file=<path>" playback, "milkdrop"/"shader" boot into those engines.
+    const wchar_t* filePath = pCmdLine ? wcsstr(pCmdLine, L"file=") : nullptr;
+    for (App* v : g_views) {
+        if (pCmdLine && wcsstr(pCmdLine, L"demo")) v->tap.SetSource(AudioTap::SRC_DEMO);
+        if (filePath) v->tap.SetFile(filePath + 5);
+        if (pCmdLine && wcsstr(pCmdLine, L"milkdrop")) v->ToggleProjectM();
+        if (pCmdLine && wcsstr(pCmdLine, L"shader")) v->ToggleShader();
+    }
 
-    // Command-line: "demo" starts on the synthetic signal, "file=<path>"
-    // plays an audio file, "milkdrop" boots into projectM, "shader" boots into
-    // the GPU shader engine.
-    if (pCmdLine && wcsstr(pCmdLine, L"demo")) g_app.tap.SetSource(AudioTap::SRC_DEMO);
-    if (pCmdLine) { const wchar_t* p = wcsstr(pCmdLine, L"file="); if (p) g_app.tap.SetFile(p + 5); }
-    if (pCmdLine && wcsstr(pCmdLine, L"milkdrop")) g_app.ToggleProjectM();
-    if (pCmdLine && wcsstr(pCmdLine, L"shader")) g_app.ToggleShader();
-
-    // Render loop: D2D presents on vsync, so this paces itself at 60.
+    // Render loop: each window presents on vsync, so this paces itself.
     MSG msg = {};
     for (;;) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -1000,18 +1063,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-        g_app.Render();
+        for (App* v : g_views) v->Render();
     }
 done:
-    g_app.SaveConfig(); // remember the setup for next launch
-    g_app.shaderHost.Destroy();
-    g_app.pmHost.Destroy();
-    g_app.tap.Stop();
-    g_app.ReleaseOffscreen();
-    SafeRelease(&g_app.brush);
-    SafeRelease(&g_app.rt);
-    SafeRelease(&g_app.hudFont);
-    SafeRelease(&g_app.dwrite);
-    SafeRelease(&g_app.d2d);
+    if (!g_views.empty()) g_views[0]->SaveConfig(); // primary window's setup persists
+    for (App* v : g_views) { v->Shutdown(); delete v; }
+    g_views.clear();
     return 0;
 }

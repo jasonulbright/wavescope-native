@@ -58,6 +58,10 @@ Keys: `SPACE`/`RIGHT` next (mode or preset), `LEFT` prev, `P` palette,
 `F` fullscreen, `H` HUD, `ESC` quit. Settings and custom palettes persist to
 `spectraviz.ini`.
 
+Launch flags: `demo` (synthetic signal), `file=<path>` (play a file),
+`milkdrop` / `shader` (boot into that engine), `wall` (borderless video wall
+across every display — keys act on the focused window, `ESC` quits all).
+
 projectM is built from `C:\projects\projectm` via `build-native.bat` there
 (MSVC/Ninja, shared DLL, installed to `install-native/`). `build.bat` links
 its import lib and stages the DLLs.
@@ -86,7 +90,7 @@ feature:
 | Settings / preset persistence | done (spectraviz.ini beside the exe) |
 | projectM preset library | done (scans a folder of .milk; L picks your archive) |
 | GPU shader modes (plasma/tunnel/fractal) | done (G: real GLSL fragment shaders on the GL context) |
-| **Multi-monitor (per-display windows)** | MISSING |
+| Multi-monitor (per-display windows) | done (`wall` flag: independent visual per screen) |
 | **On-screen control deck (auto-hiding)** | MISSING |
 | **Shortcuts / help overlay** | MISSING (static HUD only) |
 | Landing / marketing page | N/A (desktop app) |
@@ -121,9 +125,15 @@ feature:
    True per-pixel at window resolution, audio-uniform driven. `SPACE`/arrows
    cycle shaders, shuffle rotates them, `SpectraViz.exe shader` boots into it.
    Pulls in **no** new dependency (pure GPU + OS, unlike projectM's DLL).
-6. **Multi-monitor.** One borderless window + render loop per display
-   (`EnumDisplayMonitors`), independent engine/mode/palette/resolution per
-   window (each captures loopback itself, so no cross-window streaming).
+6. ~~**Multi-monitor.**~~ DONE. `SpectraViz.exe wall` spans one borderless
+   window across every display (`EnumDisplayMonitors`), each an independent
+   `App` with its own engine/mode/palette/resolution and its own loopback tap
+   (no cross-window streaming — one process, shared machine audio). It's a
+   video wall: extra screens start on distinct visuals; focus a window to
+   control it (keys act on the focused window); `ESC` on any window quits all.
+   Without the flag it stays a single 1440×900 window as before. *Per-monitor
+   config persistence is a later refinement — today the primary window's setup
+   is what's saved.*
 7. **On-screen control deck.** Auto-hiding instrument deck (source, engine,
    mode, preset, palette, resolution, shuffle), custom-drawn in the same
    pipeline, replacing keyboard-only control; plus a `?` help overlay.
