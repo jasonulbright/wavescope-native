@@ -3,6 +3,8 @@ rem SpectraViz native build. The core app is one /MT static exe with zero
 rem runtime deps; the projectM (MilkDrop) engine is the one deliberate
 rem dependency, linked as projectM-4.dll and staged next to the exe.
 call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
+rem A running instance holds SpectraViz.exe locked and fails the link.
+taskkill /f /im SpectraViz.exe >nul 2>&1
 set "PMROOT=C:\projects\projectm\install-native"
 cl /nologo /std:c++20 /O2 /MT /EHsc /W3 /DUNICODE /D_UNICODE ^
    /I "%PMROOT%\include" ^

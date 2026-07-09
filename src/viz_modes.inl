@@ -135,6 +135,7 @@ struct Mode {
     const wchar_t* name;
     float fade; // background wash alpha per frame; 1 = full clear
     void (*draw)(DrawCtx&);
+    bool flash;  // beat-burst mode; excluded by calm mode (default false)
 };
 
 struct Particle { float x, y, vx, vy, life, hue, size; };
@@ -785,17 +786,17 @@ static const Mode MODES[] = {
     { L"STRINGS",       0.25f, DrawStrings    },
     // particles
     { L"NEBULA",        0.12f, DrawNebula     },
-    { L"FOUNTAIN",      0.16f, DrawFountain   },
-    { L"STARFIELD",     0.30f, DrawStarfield  },
+    { L"FOUNTAIN",      0.16f, DrawFountain,   true },
+    { L"STARFIELD",     0.30f, DrawStarfield,  true },
     { L"SWARM",         0.14f, DrawSwarm      },
     { L"ORBITALS",      0.20f, DrawOrbitals   },
     { L"COMETS",        0.045f,DrawComets     },
     // geometry
     { L"POLYGON MORPH", 0.22f, DrawPolygonMorph },
-    { L"TUNNEL",        0.25f, DrawTunnel     },
+    { L"TUNNEL",        0.25f, DrawTunnel,    true },
     { L"KALEIDOSCOPE",  0.14f, DrawKaleido    },
     { L"SPIROGRAPH",    0.06f, DrawSpiro      },
-    { L"SHARDS",        0.13f, DrawShards     },
+    { L"SHARDS",        0.13f, DrawShards,    true },
     { L"LATTICE",       0.30f, DrawLattice    },
     // field
     { L"PLASMA",        1.00f, DrawPlasma     },
@@ -803,7 +804,7 @@ static const Mode MODES[] = {
     { L"FLOW FIELD",    0.055f,DrawFlowField  },
     { L"AURORA",        1.00f, DrawAurora     },
     { L"SIGNAL RAIN",   0.22f, DrawRain       },
-    { L"PULSE RINGS",   0.09f, DrawPulseRings },
+    { L"PULSE RINGS",   0.09f, DrawPulseRings,true },
     { L"SUNBURST",      0.16f, DrawSunburst   },
 };
 static const int MODE_COUNT = (int)(sizeof(MODES) / sizeof(MODES[0]));
