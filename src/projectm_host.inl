@@ -64,6 +64,14 @@ struct ProjectMHost {
     PFN_glBindVertexArray p_glBindVertexArray = nullptr;
 
     static LRESULT CALLBACK ChildProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+        // Forward mouse input to the parent so the shared control deck is
+        // clickable over the GL engine (child coords == parent client coords).
+        switch (m) {
+        case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP:
+        case WM_RBUTTONUP: case WM_LBUTTONDBLCLK: {
+            HWND p = GetParent(h); if (p) PostMessageW(p, m, w, l); return 0;
+        }
+        }
         return DefWindowProc(h, m, w, l);
     }
 
@@ -227,41 +235,34 @@ struct ProjectMHost {
         cw = w; ch = h;
     }
 
-    // Draw two ASCII HUD lines with legacy GL (bitmap font), after projectM
-    // has rendered, so the HUD stays visible over the MilkDrop engine.
-    void DrawHud(const char* line1, const char* line2) {
-        if (!fontBase) return;
-        if (p_glUseProgram) p_glUseProgram(0);       // back to fixed-function
-        if (p_glBindVertexArray) p_glBindVertexArray(0);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_CULL_FACE);
-        glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
-        glOrtho(0, cw, ch, 0, -1, 1);               // top-left origin
-        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
-        // Readability bar.
-        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glColor4f(0.043f, 0.051f, 0.047f, 0.55f);
-        glBegin(GL_QUADS);
-        glVertex2i(0, 0); glVertex2i(cw, 0); glVertex2i(cw, 44); glVertex2i(0, 44);
-        glEnd();
-        glDisable(GL_BLEND);
-        glColor3f(0.95f, 0.96f, 0.95f);
-        glListBase(fontBase);
-        if (line1) { glRasterPos2i(14, 18); glCallLists((GLsizei)strlen(line1), GL_UNSIGNED_BYTE, line1); }
-        if (line2) { glRasterPos2i(14, 36); glCallLists((GLsizei)strlen(line2), GL_UNSIGNED_BYTE, line2); }
-        glMatrixMode(GL_MODELVIEW); glPopMatrix();
-        glMatrixMode(GL_PROJECTION); glPopMatrix();
-        glMatrixMode(GL_MODELVIEW);
-    }
-
-    void RenderFrame(const AudioFrame& f, const char* hud1, const char* hud2) {
+    // Render the MilkDrop frame; leaves the context current with no swap, so
+    // the shared UI can be drawn over it via BeginOverlay + a GLPainter.
+    void RenderEngine(const AudioFrame& f) {
         if (!ready) return;
         wglMakeCurrent(dc, glrc);
         unsigned int maxs = projectm_pcm_get_max_samples();
         unsigned int count = maxs < 2048 ? maxs : 2048;
         projectm_pcm_add_float(pm, f.wave, count, PROJECTM_MONO);
         projectm_opengl_render_frame(pm);
-        if (hud1) DrawHud(hud1, hud2);
+    }
+
+    // Reset modern-GL state and set a top-left ortho so the UIPainter can draw
+    // with legacy immediate-mode calls over the rendered frame.
+    void BeginOverlay() {
+        if (p_glUseProgram) p_glUseProgram(0);
+        if (p_glBindVertexArray) p_glBindVertexArray(0);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+        glOrtho(0, cw, ch, 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+    }
+
+    void Present() {
+        glDisable(GL_BLEND);
+        glMatrixMode(GL_MODELVIEW); glPopMatrix();
+        glMatrixMode(GL_PROJECTION); glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
         SwapBuffers(dc);
     }
 

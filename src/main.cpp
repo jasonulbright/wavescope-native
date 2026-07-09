@@ -474,9 +474,72 @@ static float BinLog(const AudioFrame& f, float pos) {
 #include "viz_modes.inl"
 
 // The projectM (MilkDrop) engine host: child GL window + libprojectM.
+#include "ui_paint.inl"
 #include "projectm_host.inl"
 #include "shader_host.inl"
 #include "spotify.inl"
+
+// OpenGL backend for the shared UI painter. Defined here (not in the host
+// files) so it lands once, after <GL/gl.h> has been pulled in by the hosts.
+// Draws with legacy fixed-function GL; the caller (a GL host) has already made
+// its context current, reset shader/VAO state, and set an ortho projection.
+struct GLPainter : UIPainter {
+    float cw, ch;
+    GLuint font;   // wglUseFontBitmaps display-list base (glyphs 0..255)
+    GLPainter(float w, float h, GLuint f) : cw(w), ch(h), font(f) {}
+
+    float W() override { return cw; }
+    float H() override { return ch; }
+
+    void Rect(float x, float y, float w, float h,
+              float r, float g, float b, float a, bool /*round*/) override {
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glColor4f(r, g, b, a);
+        glBegin(GL_QUADS);
+        glVertex2f(x, y); glVertex2f(x + w, y); glVertex2f(x + w, y + h); glVertex2f(x, y + h);
+        glEnd();
+    }
+
+    void Text(float x, float y, float w, float h, const wchar_t* s,
+              float r, float g, float b, float a, bool center) override {
+        if (!font || !s) return;
+        // The bitmap font only has glyphs 0..255, so fold the few non-Latin-1
+        // glyphs we use (arrows, em dash) down to ASCII, split on newlines.
+        const float chW = 7.0f, lineH = 18.0f;  // Consolas ~13px advance/leading
+        glColor4f(r, g, b, a);
+        glListBase(font);
+        std::string line;
+        float ly = y + 14.0f;
+        auto flush = [&]() {
+            if (!line.empty() || true) {
+                float lx = x + 2.0f;
+                if (center) {
+                    lx = x + (w - (float)line.size() * chW) * 0.5f;
+                    float cy = y + (h - lineH) * 0.5f + 13.0f;
+                    glRasterPos2f(lx, cy);
+                } else {
+                    glRasterPos2f(lx, ly);
+                }
+                if (!line.empty())
+                    glCallLists((GLsizei)line.size(), GL_UNSIGNED_BYTE, line.data());
+            }
+            line.clear(); ly += lineH;
+        };
+        for (const wchar_t* p = s; *p; ++p) {
+            wchar_t c = *p;
+            if (c == L'\n') { flush(); continue; }
+            char a2;
+            if (c == 0x2039 || c == 0x2190 || c == 0x2308) a2 = '<';
+            else if (c == 0x203A || c == 0x2192) a2 = '>';
+            else if (c == 0x2014 || c == 0x2013) a2 = '-';
+            else if (c > 255) a2 = ' ';
+            else a2 = (char)c;
+            line += a2;
+        }
+        flush();
+    }
+};
 
 // --------------------------------------------------------------------- app
 
@@ -618,37 +681,39 @@ struct App {
         tap.Analyze(frame, now);
         if (calm) frame.beat *= 0.2f; // photosensitivity: tame the pulse
 
-        // projectM engine: render OpenGL on the child window instead of D2D.
+        // Auto-hide the deck once idle (shared by every engine).
+        if (deckVisible && now - deckActivity > 2.5f) { deckVisible = false; deckHover = -1; }
+        static const wchar_t* SHUF[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
+
+        // projectM engine: render OpenGL on the child window, then the shared
+        // UI (HUD + deck + help) over it with the GL painter.
         if (pmActive && pmHost.ready) {
-            char l1[256] = {}, l2[256] = {};
-            if (hud) {
-                char preset[160] = {}, src[32] = {};
-                WideCharToMultiByte(CP_ACP, 0, pmHost.PresetName(), -1, preset, sizeof(preset), nullptr, nullptr);
-                WideCharToMultiByte(CP_ACP, 0, tap.SourceName(), -1, src, sizeof(src), nullptr, nullptr);
-                static const char* shuf[] = { "off", "15s", "30s", "1m", "5m" };
-                _snprintf_s(l1, _TRUNCATE, "SPECTRAVIZ  projectM  %s  (%d presets)  SRC %s  SHUF %s  FPS %d",
-                            preset, pmHost.PresetCount(), src, shuf[shuffleIdx], fps);
-                _snprintf_s(l2, _TRUNCATE, "SPACE/arrows preset  L folder  1 sys  2 mic  3 demo  4 file  S shuffle  M exit  F full  H hud");
-            }
-            pmHost.RenderFrame(frame, hud ? l1 : nullptr, hud ? l2 : nullptr);
+            wchar_t l1[300], l2[280];
+            swprintf_s(l1, L"SPECTRAVIZ  projectM  %s  (%d presets)  SRC %s  SHUF %s  FPS %d",
+                       pmHost.PresetName(), pmHost.PresetCount(), tap.SourceName(), SHUF[shuffleIdx], fps);
+            swprintf_s(l2, L"SPACE/\x2190\x2192 preset  L folder  1-4 src  S shuffle  M exit  G gpu  B spotify  F full  H hud  F1 help  ESC");
+            pmHost.RenderEngine(frame);
+            pmHost.BeginOverlay();
+            GLPainter gp((float)pmHost.cw, (float)pmHost.ch, pmHost.fontBase);
+            DrawUI(gp, l1, l2);
+            pmHost.Present();
             fpsFrames++;
             if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
             return;
         }
 
-        // GPU shader engine: a fullscreen fragment shader on the child window.
+        // GPU shader engine: a fullscreen fragment shader, same UI over it.
         if (shaderActive && shaderHost.ready) {
-            char l1[256] = {}, l2[256] = {};
-            if (hud) {
-                char name[64] = {}, src[32] = {};
-                WideCharToMultiByte(CP_ACP, 0, shaderHost.ShaderName(shaderIdx), -1, name, sizeof(name), nullptr, nullptr);
-                WideCharToMultiByte(CP_ACP, 0, tap.SourceName(), -1, src, sizeof(src), nullptr, nullptr);
-                static const char* shuf[] = { "off", "15s", "30s", "1m", "5m" };
-                _snprintf_s(l1, _TRUNCATE, "SPECTRAVIZ  GPU shader  %s  (%d/%d)  SRC %s  SHUF %s  FPS %d",
-                            name, (shaderIdx % shaderHost.ShaderCount()) + 1, shaderHost.ShaderCount(), src, shuf[shuffleIdx], fps);
-                _snprintf_s(l2, _TRUNCATE, "SPACE/arrows shader  1 sys  2 mic  3 demo  4 file  S shuffle  G exit  M milkdrop  F full  H hud");
-            }
-            shaderHost.RenderFrame(shaderIdx, frame, hud ? l1 : nullptr, hud ? l2 : nullptr);
+            wchar_t l1[300], l2[280];
+            swprintf_s(l1, L"SPECTRAVIZ  GPU shader  %s  (%d/%d)  SRC %s  SHUF %s  FPS %d",
+                       shaderHost.ShaderName(shaderIdx), (shaderIdx % shaderHost.ShaderCount()) + 1,
+                       shaderHost.ShaderCount(), tap.SourceName(), SHUF[shuffleIdx], fps);
+            swprintf_s(l2, L"SPACE/\x2190\x2192 shader  1-4 src  S shuffle  G exit  M milk  B spotify  F full  H hud  F1 help  ESC");
+            shaderHost.RenderEngine(shaderIdx, frame);
+            shaderHost.BeginOverlay();
+            GLPainter gp((float)shaderHost.cw, (float)shaderHost.ch, shaderHost.fontBase);
+            DrawUI(gp, l1, l2);
+            shaderHost.Present();
             fpsFrames++;
             if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
             return;
@@ -679,22 +744,14 @@ struct App {
             bmp->Release();
         }
 
-        if (hud && hudFont) {
-            wchar_t text[360];
-            static const wchar_t* shuf[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
-            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  N new-palette  1-4 source  R res  S shuffle  C calm  M milkdrop  G shader  B spotify  F full  H hud  F1 help  ESC",
-                       modeIdx + 1, MODE_COUNT, mode.name, PaletteName(), tap.SourceName(),
-                       RES_OPTS[resIdx].name, offW, offH, shuf[shuffleIdx], calm ? L"  CALM" : L"", fps, frame.level);
-            brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.75f));
-            rt->DrawTextW(text, (UINT32)wcslen(text), hudFont,
-                          D2D1::RectF(16, 12, size.width - 16, 80), brush);
-        }
-
-        if (deckVisible && deckFont) {
-            if (Now() - deckActivity > 2.5f) { deckVisible = false; deckHover = -1; }
-            else DrawDeck(size);
-        }
-        if (help && hudFont) DrawHelp(size);
+        wchar_t l1[300], l2[280];
+        static const wchar_t* shuf[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
+        swprintf_s(l1, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f",
+                   modeIdx + 1, MODE_COUNT, mode.name, PaletteName(), tap.SourceName(),
+                   RES_OPTS[resIdx].name, offW, offH, shuf[shuffleIdx], calm ? L"  CALM" : L"", fps, frame.level);
+        swprintf_s(l2, L"SPACE/\x2190\x2192 cycle  P palette  N new  1-4 src  R res  S shuffle  C calm  M milk  G gpu  B spotify  F full  H hud  F1 help  ESC");
+        D2DPainter dp(rt, brush, hudFont, deckFont);
+        DrawUI(dp, l1, l2);
 
         HRESULT hr = rt->EndDraw();
         if (hr == (HRESULT)D2DERR_RECREATE_TARGET) CreateTarget();
@@ -707,10 +764,10 @@ struct App {
         }
     }
 
-    // ----- auto-hiding control deck (bottom bar, built-in-mode view) -----
-    // Clicking a button runs the same action as its keyboard shortcut. In the
-    // GL engines (projectM/GPU) the child window covers this D2D bar, so the
-    // deck is a built-in-mode surface; keyboard still drives every engine.
+    // ----- auto-hiding control deck (bottom bar) -----
+    // Clicking a button runs the same action as its keyboard shortcut. Drawn
+    // via the shared UIPainter, so it appears identically over every engine
+    // (D2D built-in modes and the GL projectM / shader engines alike).
     enum { DK_SYS, DK_MIC, DK_DEMO, DK_FILE, DK_MODES, DK_MILK, DK_GPU,
            DK_PREV, DK_NEXT, DK_PAL, DK_RES, DK_SHUF, DK_CALM, DK_HUD, DK_SPOT, DK_N };
 
@@ -722,10 +779,10 @@ struct App {
     }
 
     // Fill `out` with each button's rect and return the bar background rect.
-    D2D1_RECT_F DeckLayout(D2D1_SIZE_F size, D2D1_RECT_F out[DK_N]) {
+    D2D1_RECT_F DeckLayout(float W, float H, D2D1_RECT_F out[DK_N]) {
         const float margin = 20, barH = 50, gap = 5, bottom = 14;
-        float x0 = margin, x1 = size.width - margin;
-        float y0 = size.height - barH - bottom, y1 = y0 + barH;
+        float x0 = margin, x1 = W - margin;
+        float y0 = H - barH - bottom, y1 = y0 + barH;
         float bw = (x1 - x0 - gap * (int)(DK_N - 1)) / (float)DK_N;
         for (int i = 0; i < DK_N; i++) {
             float bx = x0 + i * (bw + gap);
@@ -738,7 +795,7 @@ struct App {
         if (!rt) return -1;
         D2D1_SIZE_F size = rt->GetSize();
         D2D1_RECT_F b[DK_N];
-        DeckLayout(size, b);
+        DeckLayout(size.width, size.height, b);
         for (int i = 0; i < DK_N; i++)
             if (mx >= b[i].left && mx <= b[i].right && my >= b[i].top && my <= b[i].bottom)
                 return i;
@@ -793,28 +850,40 @@ struct App {
         if (hit >= 0) { DeckDispatch(hit); deckActivity = Now(); }
     }
 
-    void DrawDeck(D2D1_SIZE_F size) {
+    // The whole on-screen UI, drawn through the abstract painter so it renders
+    // identically over every engine. `l1`/`l2` are the engine-specific HUD
+    // status + hint lines built by Render.
+    void DrawUI(UIPainter& p, const wchar_t* l1, const wchar_t* l2) {
+        float W = p.W(), H = p.H();
+        if (hud) {
+            p.Rect(0, 0, W, 46, 0.043f, 0.051f, 0.047f, 0.42f);
+            if (l1) p.Text(16, 4, W - 32, 20, l1, 0.95f, 0.96f, 0.95f, 0.92f);
+            if (l2) p.Text(16, 24, W - 32, 20, l2, 0.80f, 0.83f, 0.82f, 0.80f);
+        }
+        if (deckVisible) DrawDeckP(p);
+        if (help) DrawHelpP(p);
+    }
+
+    void DrawDeckP(UIPainter& p) {
         D2D1_RECT_F b[DK_N];
-        D2D1_RECT_F bar = DeckLayout(size, b);
-        D2D1_ROUNDED_RECT barR = { bar, 10, 10 };
-        brush->SetColor(D2D1::ColorF(0.03f, 0.04f, 0.04f, 0.86f));
-        rt->FillRoundedRectangle(barR, brush);
+        D2D1_RECT_F bar = DeckLayout(p.W(), p.H(), b);
+        p.Rect(bar.left, bar.top, bar.right - bar.left, bar.bottom - bar.top,
+               0.03f, 0.04f, 0.04f, 0.86f, true);
         for (int i = 0; i < DK_N; i++) {
-            D2D1_ROUNDED_RECT br = { b[i], 6, 6 };
             bool active = DeckActive(i), hover = (i == deckHover);
-            if (active)      brush->SetColor(D2D1::ColorF(0.20f, 0.42f, 0.72f, 0.95f));
-            else if (hover)  brush->SetColor(D2D1::ColorF(0.16f, 0.19f, 0.22f, 0.95f));
-            else             brush->SetColor(D2D1::ColorF(0.09f, 0.11f, 0.12f, 0.90f));
-            rt->FillRoundedRectangle(br, brush);
-            brush->SetColor(active ? D2D1::ColorF(1, 1, 1, 0.98f)
-                                   : D2D1::ColorF(0.86f, 0.88f, 0.88f, 0.92f));
-            const wchar_t* lbl = DeckLabel(i);
-            rt->DrawTextW(lbl, (UINT32)wcslen(lbl), deckFont, b[i], brush);
+            float br_ = active ? 0.20f : (hover ? 0.16f : 0.09f);
+            float bg_ = active ? 0.42f : (hover ? 0.19f : 0.11f);
+            float bb_ = active ? 0.72f : (hover ? 0.22f : 0.12f);
+            p.Rect(b[i].left, b[i].top, b[i].right - b[i].left, b[i].bottom - b[i].top,
+                   br_, bg_, bb_, 0.93f, true);
+            float tr = active ? 1.0f : 0.86f, tg = active ? 1.0f : 0.88f, tb = active ? 1.0f : 0.88f;
+            p.Text(b[i].left, b[i].top, b[i].right - b[i].left, b[i].bottom - b[i].top,
+                   DeckLabel(i), tr, tg, tb, 0.96f, true);
         }
     }
 
-    // Full keymap overlay (F1 / ?), a centered card over the built-in modes.
-    void DrawHelp(D2D1_SIZE_F size) {
+    // Full keymap overlay (F1 / ?), a centered card over any engine.
+    void DrawHelpP(UIPainter& p) {
         static const wchar_t* HELP =
             L"SPECTRAVIZ  \x2014  KEYS\n"
             L"\n"
@@ -837,16 +906,10 @@ struct App {
             L"Launch: SpectraViz.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
             L"        [install-startup | remove-startup]   \x2014   tray icon: right-click";
         float w = 620, h = 448;
-        float x = (size.width - w) * 0.5f, y = (size.height - h) * 0.5f;
+        float x = (p.W() - w) * 0.5f, y = (p.H() - h) * 0.5f;
         if (x < 0) x = 0; if (y < 0) y = 0;
-        D2D1_ROUNDED_RECT card = { D2D1::RectF(x, y, x + w, y + h), 10, 10 };
-        brush->SetColor(D2D1::ColorF(0.03f, 0.04f, 0.04f, 0.9f));
-        rt->FillRoundedRectangle(card, brush);
-        brush->SetColor(D2D1::ColorF(0.30f, 0.55f, 0.85f, 0.9f));
-        rt->DrawRoundedRectangle(card, brush, 1.5f);
-        brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.95f));
-        rt->DrawTextW(HELP, (UINT32)wcslen(HELP), hudFont,
-                      D2D1::RectF(x + 22, y + 20, x + w - 16, y + h - 12), brush);
+        p.Rect(x, y, w, h, 0.03f, 0.04f, 0.04f, 0.92f, true);
+        p.Text(x + 22, y + 18, w - 32, h - 24, HELP, 0.95f, 0.96f, 0.95f, 0.96f);
     }
 
     void ToggleFullscreen() {
