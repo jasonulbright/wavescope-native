@@ -517,6 +517,7 @@ struct App {
     int shuffleIdx = 0;      // index into SHUFFLE_SECS
     float lastShuffle = 0;
     bool hud = true;
+    bool help = false;       // F1 / ? full keymap overlay
     bool fullscreen = false;
     WINDOWPLACEMENT savedPlacement = { sizeof(WINDOWPLACEMENT) };
     LARGE_INTEGER qpcFreq = {}, qpcStart = {};
@@ -666,13 +667,15 @@ struct App {
         if (hud && hudFont) {
             wchar_t text[360];
             static const wchar_t* shuf[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
-            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  N new-palette  1-4 source  R res  S shuffle  C calm  M milkdrop  G shader  F full  H hud  ESC",
+            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  N new-palette  1-4 source  R res  S shuffle  C calm  M milkdrop  G shader  F full  H hud  F1 help  ESC",
                        modeIdx + 1, MODE_COUNT, mode.name, PaletteName(), tap.SourceName(),
                        RES_OPTS[resIdx].name, offW, offH, shuf[shuffleIdx], calm ? L"  CALM" : L"", fps, frame.level);
             brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.75f));
             rt->DrawTextW(text, (UINT32)wcslen(text), hudFont,
                           D2D1::RectF(16, 12, size.width - 16, 80), brush);
         }
+
+        if (help && hudFont) DrawHelp(size);
 
         HRESULT hr = rt->EndDraw();
         if (hr == (HRESULT)D2DERR_RECREATE_TARGET) CreateTarget();
@@ -683,6 +686,40 @@ struct App {
             fpsFrames = 0;
             fpsWindowStart = now;
         }
+    }
+
+    // Full keymap overlay (F1 / ?), a centered card over the built-in modes.
+    void DrawHelp(D2D1_SIZE_F size) {
+        static const wchar_t* HELP =
+            L"SPECTRAVIZ  \x2014  KEYS\n"
+            L"\n"
+            L"SPACE / \x2192      next mode (or preset / shader)\n"
+            L"\x2190              previous\n"
+            L"P              cycle trace palette\n"
+            L"N              new custom palette (color picker)\n"
+            L"1 / 2 / 3      source: system / mic / demo\n"
+            L"4              open an audio file\n"
+            L"M              MilkDrop engine (projectM)\n"
+            L"G              GPU shader engine\n"
+            L"S              shuffle timer (off / 15s / 30s / 1m / 5m)\n"
+            L"C              calm mode (photosensitive-safe)\n"
+            L"R              resolution (AUTO / 1080 / 1440 / 4K / 8K)\n"
+            L"L              MilkDrop preset folder\n"
+            L"F              fullscreen        H   HUD on/off\n"
+            L"F1 / ?         this help         ESC quit\n"
+            L"\n"
+            L"Launch: SpectraViz.exe [demo | file=PATH | milkdrop | shader | wall]";
+        float w = 560, h = 400;
+        float x = (size.width - w) * 0.5f, y = (size.height - h) * 0.5f;
+        if (x < 0) x = 0; if (y < 0) y = 0;
+        D2D1_ROUNDED_RECT card = { D2D1::RectF(x, y, x + w, y + h), 10, 10 };
+        brush->SetColor(D2D1::ColorF(0.03f, 0.04f, 0.04f, 0.9f));
+        rt->FillRoundedRectangle(card, brush);
+        brush->SetColor(D2D1::ColorF(0.30f, 0.55f, 0.85f, 0.9f));
+        rt->DrawRoundedRectangle(card, brush, 1.5f);
+        brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.95f));
+        rt->DrawTextW(HELP, (UINT32)wcslen(HELP), hudFont,
+                      D2D1::RectF(x + 22, y + 20, x + w - 16, y + h - 12), brush);
     }
 
     void ToggleFullscreen() {
@@ -977,6 +1014,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'G':      a->ToggleShader(); break;
         case 'F':      a->ToggleFullscreen(); break;
         case 'H':      a->hud = !a->hud; break;
+        case VK_F1:    a->help = !a->help; break;
+        case VK_OEM_2: if (GetKeyState(VK_SHIFT) & 0x8000) a->help = !a->help; break; // '?'
         case VK_ESCAPE: PostQuitMessage(0); break;  // ESC on any window quits all
         }
         return 0;
