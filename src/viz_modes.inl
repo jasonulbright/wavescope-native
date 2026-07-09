@@ -72,7 +72,7 @@ static const int PAL_COUNT = (int)(sizeof(PALETTES) / sizeof(PALETTES[0]));
 // --------------------------------------------------------------- DrawCtx
 
 struct DrawCtx {
-    ID2D1HwndRenderTarget* rt;
+    ID2D1RenderTarget* rt;   // window or offscreen target (base interface)
     ID2D1Factory* factory;
     ID2D1SolidColorBrush* brush;
     D2D1_COLOR_F (*pal)(float, float);

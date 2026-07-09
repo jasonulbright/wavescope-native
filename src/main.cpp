@@ -479,6 +479,13 @@ static float BinLog(const AudioFrame& f, float pos) {
 static const int SHUFFLE_SECS[] = { 0, 15, 30, 60, 300 };
 static const int SHUFFLE_COUNT = (int)(sizeof(SHUFFLE_SECS) / sizeof(SHUFFLE_SECS[0]));
 
+// Render-resolution targets (backing-store height); 0 = auto (window size).
+struct ResOpt { const wchar_t* name; int height; };
+static const ResOpt RES_OPTS[] = {
+    { L"AUTO",  0 }, { L"1080", 1080 }, { L"1440", 1440 }, { L"4K", 2160 }, { L"8K", 4320 },
+};
+static const int RES_COUNT = (int)(sizeof(RES_OPTS) / sizeof(RES_OPTS[0]));
+
 struct App {
     HWND hwnd = nullptr;
     ID2D1Factory* d2d = nullptr;
@@ -490,8 +497,12 @@ struct App {
     HINSTANCE inst = nullptr;
     ProjectMHost pmHost;
     bool pmActive = false;
+    ID2D1BitmapRenderTarget* offscreen = nullptr;
+    ID2D1SolidColorBrush* offBrush = nullptr;
+    UINT offW = 0, offH = 0;
     int modeIdx = 0;
     int paletteIdx = 0;
+    int resIdx = 0;          // index into RES_OPTS
     bool calm = false;
     int shuffleIdx = 0;      // index into SHUFFLE_SECS
     float lastShuffle = 0;
@@ -519,17 +530,45 @@ struct App {
         return CreateTarget();
     }
 
+    void ReleaseOffscreen() {
+        SafeRelease(&offBrush);
+        SafeRelease(&offscreen);
+        offW = offH = 0;
+    }
+
+    // The offscreen target the modes draw into, sized to the resolution
+    // setting; it holds the phosphor-trail content between frames.
+    bool EnsureOffscreen(int clientW, int clientH) {
+        int th = RES_OPTS[resIdx].height;
+        UINT w, h;
+        if (th <= 0) { w = (UINT)(clientW > 0 ? clientW : 1); h = (UINT)(clientH > 0 ? clientH : 1); }
+        else {
+            h = (UINT)th;
+            w = (UINT)((float)th * (float)clientW / (float)(clientH > 0 ? clientH : 1) + 0.5f);
+            if (w > 7680) { h = (UINT)((float)h * 7680.0f / (float)w); w = 7680; }
+            if (w < 1) w = 1; if (h < 1) h = 1;
+        }
+        if (offscreen && offW == w && offH == h) return true;
+        ReleaseOffscreen();
+        D2D1_SIZE_U px = D2D1::SizeU(w, h);
+        if (FAILED(rt->CreateCompatibleRenderTarget(nullptr, &px, nullptr,
+                D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, &offscreen)))
+            return false;
+        offscreen->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &offBrush);
+        offW = w; offH = h;
+        return true;
+    }
+
     bool CreateTarget() {
         SafeRelease(&brush);
         SafeRelease(&rt);
+        ReleaseOffscreen(); // tied to the old rt via CreateCompatibleRenderTarget
         RECT rc;
         GetClientRect(hwnd, &rc);
         D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
-        // RETAIN_CONTENTS keeps last frame's pixels: phosphor trails are a
-        // translucent black wash, exactly like the web engine's fade.
         HRESULT hr = d2d->CreateHwndRenderTarget(
             D2D1::RenderTargetProperties(),
-            D2D1::HwndRenderTargetProperties(hwnd, size, D2D1_PRESENT_OPTIONS_RETAIN_CONTENTS),
+            D2D1::HwndRenderTargetProperties(hwnd, size),
             &rt);
         if (FAILED(hr)) return false;
         rt->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
@@ -562,20 +601,35 @@ struct App {
 
         const Mode& mode = MODES[modeIdx];
 
-        rt->BeginDraw();
-        // Fade wash (instrument black #0B0D0C).
-        brush->SetColor(D2D1::ColorF(0.043f, 0.051f, 0.047f, mode.fade));
-        rt->FillRectangle(D2D1::RectF(0, 0, size.width, size.height), brush);
+        RECT rc; GetClientRect(hwnd, &rc);
+        EnsureOffscreen(rc.right, rc.bottom);
 
-        DrawCtx g{ rt, d2d, brush, PALETTES[paletteIdx].color, size.width, size.height, &frame };
+        // Draw the visualizer into the offscreen target at the chosen
+        // resolution. It retains its content between frames, so the fade wash
+        // produces phosphor trails.
+        offscreen->BeginDraw();
+        offBrush->SetColor(D2D1::ColorF(0.043f, 0.051f, 0.047f, mode.fade));
+        offscreen->FillRectangle(D2D1::RectF(0, 0, (float)offW, (float)offH), offBrush);
+        DrawCtx g{ offscreen, d2d, offBrush, PALETTES[paletteIdx].color, (float)offW, (float)offH, &frame };
         mode.draw(g);
+        offscreen->EndDraw();
+
+        // Present: blit the offscreen scaled to the window, then the HUD.
+        rt->BeginDraw();
+        ID2D1Bitmap* bmp = nullptr;
+        offscreen->GetBitmap(&bmp);
+        if (bmp) {
+            rt->DrawBitmap(bmp, D2D1::RectF(0, 0, size.width, size.height), 1.0f,
+                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            bmp->Release();
+        }
 
         if (hud && hudFont) {
             wchar_t text[360];
             static const wchar_t* shuf[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
-            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  1 sys  2 mic  3 demo  4 file  S shuffle  C calm  M milkdrop  F full  H hud  ESC",
+            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  1 sys  2 mic  3 demo  4 file  R res  S shuffle  C calm  M milkdrop  F full  H hud  ESC",
                        modeIdx + 1, MODE_COUNT, mode.name, PALETTES[paletteIdx].name, tap.SourceName(),
-                       shuf[shuffleIdx], calm ? L"  CALM" : L"", fps, frame.level);
+                       RES_OPTS[resIdx].name, offW, offH, shuf[shuffleIdx], calm ? L"  CALM" : L"", fps, frame.level);
             brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.75f));
             rt->DrawTextW(text, (UINT32)wcslen(text), hudFont,
                           D2D1::RectF(16, 12, size.width - 16, 80), brush);
@@ -700,6 +754,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case '4':      g_app.OpenFile(); break;
         case 'S':      g_app.CycleShuffle(); break;
         case 'C':      g_app.SetCalm(!g_app.calm); break;
+        case 'R':      g_app.resIdx = (g_app.resIdx + 1) % RES_COUNT; break;
         case 'M':      g_app.ToggleProjectM(); break;
         case 'F':      g_app.ToggleFullscreen(); break;
         case 'H':      g_app.hud = !g_app.hud; break;
@@ -754,6 +809,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
 done:
     g_app.pmHost.Destroy();
     g_app.tap.Stop();
+    g_app.ReleaseOffscreen();
     SafeRelease(&g_app.brush);
     SafeRelease(&g_app.rt);
     SafeRelease(&g_app.hudFont);

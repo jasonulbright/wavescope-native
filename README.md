@@ -70,9 +70,9 @@ feature:
 | Microphone source | done (key 2) |
 | Audio-file source | done (key 4, Media Foundation decode + play) |
 | **Spotify (quick + PKCE)** | MISSING |
-| **Resolution targets (1080-8K)** | MISSING (renders at window size) |
-| **Shuffle timer (modes + palettes)** | MISSING |
-| **Calm mode (photosensitivity)** | MISSING |
+| Resolution targets (1080-8K) | done (key R; offscreen render + scale) |
+| Shuffle timer | done for modes (key S); palette-shuffle + include list with the deck |
+| Calm mode (photosensitivity) | done (key C) |
 | **Custom palette creation** | MISSING |
 | **Settings / preset persistence** | MISSING |
 | **projectM preset library + upload** | MISSING (2 bundled only) |
@@ -88,10 +88,12 @@ feature:
 1. ~~**Audio input sources.**~~ DONE. Loopback (1), mic (2), demo (3), and
    audio file (4, Media Foundation decode + WASAPI render + analyze, loops;
    also `SpectraViz.exe file=<path>`). All four switchable at runtime.
-2. **Playback controls.** Resolution targets (render-to-texture at
-   1080/1440/2160/4320 then scale), shuffle timer for modes and palettes
-   with an include list, calm mode (exclude the beat-burst modes + soften
-   the beat envelope).
+2. ~~**Playback controls.**~~ DONE. Resolution targets (R: AUTO/1080/1440/
+   4K/8K, rendered into an offscreen bitmap then scaled to the window),
+   shuffle timer (S: off/15s/30s/1m/5m, hops modes or projectM presets), calm
+   mode (C: excludes the 5 beat-burst modes + softens the beat envelope).
+   *Palette-shuffle + the per-palette include list come with the deck (step
+   7), since they need UI.*
 3. **Custom palettes + persistence.** Palette creation from color stops;
    persist palettes, custom presets, and settings (calm/shuffle/last mode)
    to a config file beside the exe.
