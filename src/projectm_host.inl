@@ -54,6 +54,8 @@ struct ProjectMHost {
     projectm_handle pm = nullptr;
     std::vector<std::wstring> presetPaths;
     std::wstring curName = L"(none)";
+    std::wstring scanDir;             // folder currently scanned/watched
+    HANDLE presetWatch = nullptr;     // hot-reload change notification
     int presetIdx = 0;
     bool ready = false;
     GLuint fontBase = 0;      // wglUseFontBitmaps display-list base for the HUD
@@ -147,8 +149,10 @@ struct ProjectMHost {
         return true;
     }
 
-    // Collect every .milk file in a folder into the playable list.
+    // Collect every .milk file in a folder into the playable list, and (re)arm
+    // a folder watch so dropping/removing presets hot-reloads the library.
     void ScanPresets(const std::wstring& folder) {
+        scanDir = folder;
         presetPaths.clear();
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW((folder + L"\\*.milk").c_str(), &fd);
@@ -158,6 +162,23 @@ struct ProjectMHost {
                     presetPaths.push_back(folder + L"\\" + fd.cFileName);
             } while (FindNextFileW(h, &fd));
             FindClose(h);
+        }
+        if (presetWatch && presetWatch != INVALID_HANDLE_VALUE)
+            FindCloseChangeNotification(presetWatch);
+        presetWatch = FindFirstChangeNotificationW(folder.c_str(), FALSE,
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE);
+    }
+
+    // Rescan (non-blocking) when the watched preset folder changes on disk.
+    void PollReload() {
+        if (!presetWatch || presetWatch == INVALID_HANDLE_VALUE) return;
+        if (WaitForSingleObject(presetWatch, 0) != WAIT_OBJECT_0) return;
+        std::wstring keep = curName;
+        ScanPresets(scanDir);   // re-arms the watch
+        // Keep the same preset selected if it survived the change.
+        for (size_t i = 0; i < presetPaths.size(); i++) {
+            const wchar_t* base = wcsrchr(presetPaths[i].c_str(), L'\\');
+            if (keep == (base ? base + 1 : presetPaths[i].c_str())) { presetIdx = (int)i; break; }
         }
     }
 
@@ -245,6 +266,7 @@ struct ProjectMHost {
     }
 
     void Destroy() {
+        if (presetWatch && presetWatch != INVALID_HANDLE_VALUE) { FindCloseChangeNotification(presetWatch); presetWatch = nullptr; }
         if (fontBase && glrc) { wglMakeCurrent(dc, glrc); glDeleteLists(fontBase, 256); fontBase = 0; }
         if (pm) { projectm_destroy(pm); pm = nullptr; }
         if (glrc) { wglMakeCurrent(nullptr, nullptr); wglDeleteContext(glrc); glrc = nullptr; }
