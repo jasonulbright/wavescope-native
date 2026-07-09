@@ -5,10 +5,11 @@
 // Everything below links against OS DLLs only; /MT static CRT means the
 // shipped artifact is one .exe with zero runtime requirements.
 //
-// Keys: SPACE next mode, LEFT prev, F fullscreen, H hide HUD, ESC quit.
+// Keys: SPACE/RIGHT next mode, LEFT prev, P palette, F fullscreen, H HUD,
+// ESC quit.
 //
-// Phase 2 (see README): vendor MilkDrop 2 (vis_milk2 + ns-eel2, BSD) for
-// raw .milk preset support; port the remaining WaveScope modes.
+// All 34 WaveScope modes are ported (see viz_modes.inl) across six trace
+// palettes. Phase 2 (see README): MilkDrop via projectM (C++/OpenGL).
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -22,6 +23,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #pragma comment(lib, "user32.lib")
@@ -288,7 +291,8 @@ private:
 
 // ------------------------------------------------------------------- modes
 
-// Log-axis FFT sampling, matching the web engine's bin() helper.
+// Log-axis FFT sampling, matching the web engine's bin() helper. Defined here
+// (before the include) because the ported modes rely on it.
 static float BinLog(const AudioFrame& f, float pos) {
     if (pos < 0) pos = 0;
     if (pos > 1) pos = 1;
@@ -297,89 +301,8 @@ static float BinLog(const AudioFrame& f, float pos) {
     return f.fft[idx];
 }
 
-struct DrawCtx {
-    ID2D1HwndRenderTarget* rt;
-    ID2D1SolidColorBrush* brush;
-    float w, h;
-    const AudioFrame* f;
-
-    void SetColor(float pos, float alpha) { brush->SetColor(Trace(pos, alpha)); }
-    void FillRect(float x, float y, float rw, float rh) {
-        rt->FillRectangle(D2D1::RectF(x, y, x + rw, y + rh), brush);
-    }
-    void Line(float x0, float y0, float x1, float y1, float width) {
-        rt->DrawLine(D2D1::Point2F(x0, y0), D2D1::Point2F(x1, y1), brush, width);
-    }
-};
-
-struct Mode {
-    const wchar_t* name;
-    float fade; // background wash alpha per frame; 1 = full clear
-    void (*draw)(DrawCtx&);
-};
-
-// 01 Bars: classic log-spaced frequency bars.
-static void DrawBars(DrawCtx& g) {
-    const AudioFrame& f = *g.f;
-    int n = (int)(g.w / 28.0f);
-    if (n < 24) n = 24;
-    if (n > 96) n = 96;
-    static float smooth[96] = {};
-    float gap = g.w / n / 6.0f;
-    float bw = g.w / n - gap;
-    for (int i = 0; i < n; i++) {
-        float target = BinLog(f, (float)i / (n - 1));
-        smooth[i] += (target - smooth[i]) * 0.65f;
-        float h = smooth[i] * g.h * 0.85f;
-        g.SetColor((float)i / n, 0.95f);
-        g.FillRect(i * (bw + gap) + gap / 2, g.h - h, bw, h);
-    }
-}
-
-// 02 Oscilloscope: phosphor trace of the raw signal.
-static void DrawScope(DrawCtx& g) {
-    const AudioFrame& f = *g.f;
-    g.SetColor(0.8f, 0.95f);
-    float lw = g.h / 320.0f;
-    if (lw < 2) lw = 2;
-    const int STEP = 8;
-    float px = 0, py = g.h / 2 + f.wave[0] * g.h * 0.4f;
-    for (int i = STEP; i < 2048; i += STEP) {
-        float x = (float)i / 2047.0f * g.w;
-        float y = g.h / 2 + f.wave[i] * g.h * 0.4f;
-        g.Line(px, py, x, y, lw);
-        px = x; py = y;
-    }
-}
-
-// 03 Radial bars: the spectrum wrapped into a rotating ring.
-static void DrawRadial(DrawCtx& g) {
-    const AudioFrame& f = *g.f;
-    const int n = 96;
-    static float smooth[n] = {};
-    float cx = g.w / 2, cy = g.h / 2;
-    float m = g.w < g.h ? g.w : g.h;
-    float r0 = m * (0.18f + f.bass * 0.05f);
-    float rot = f.t * 0.15f;
-    float lw = TAU * r0 / n / 2.4f;
-    if (lw < 2) lw = 2;
-    for (int i = 0; i < n; i++) {
-        float target = BinLog(f, (float)i / (n - 1));
-        smooth[i] += (target - smooth[i]) * 0.65f;
-        float a = (float)i / n * TAU + rot;
-        float len = smooth[i] * m * 0.3f;
-        g.SetColor((float)i / n, 0.95f);
-        g.Line(cx + cosf(a) * r0, cy + sinf(a) * r0,
-               cx + cosf(a) * (r0 + len), cy + sinf(a) * (r0 + len), lw);
-    }
-}
-
-static const Mode MODES[] = {
-    { L"BARS",         1.00f, DrawBars   },
-    { L"OSCILLOSCOPE", 0.35f, DrawScope  },
-    { L"RADIAL BARS",  0.30f, DrawRadial },
-};
-static const int MODE_COUNT = sizeof(MODES) / sizeof(MODES[0]);
+// Palettes, the DrawCtx primitives, all 34 modes, and the MODES[] registry.
+#include "viz_modes.inl"
 
 // --------------------------------------------------------------------- app
 
@@ -392,6 +315,7 @@ struct App {
     IDWriteTextFormat* hudFont = nullptr;
     AudioTap tap;
     int modeIdx = 0;
+    int paletteIdx = 0;
     bool hud = true;
     bool fullscreen = false;
     WINDOWPLACEMENT savedPlacement = { sizeof(WINDOWPLACEMENT) };
@@ -448,13 +372,13 @@ struct App {
         brush->SetColor(D2D1::ColorF(0.043f, 0.051f, 0.047f, mode.fade));
         rt->FillRectangle(D2D1::RectF(0, 0, size.width, size.height), brush);
 
-        DrawCtx g{ rt, brush, size.width, size.height, &frame };
+        DrawCtx g{ rt, d2d, brush, PALETTES[paletteIdx].color, size.width, size.height, &frame };
         mode.draw(g);
 
         if (hud && hudFont) {
             wchar_t text[256];
-            swprintf_s(text, L"SPECTRAVIZ  MODE %02d %s  FPS %d  LEVEL %.2f\nSPACE next  \x2190 prev  F fullscreen  H hud  ESC quit",
-                       modeIdx + 1, mode.name, fps, frame.level);
+            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  FPS %d  LEVEL %.2f\nSPACE next  \x2190 prev  P palette  F fullscreen  H hud  ESC quit",
+                       modeIdx + 1, MODE_COUNT, mode.name, PALETTES[paletteIdx].name, fps, frame.level);
             brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.75f));
             rt->DrawTextW(text, (UINT32)wcslen(text), hudFont,
                           D2D1::RectF(16, 12, size.width - 16, 80), brush);
@@ -508,6 +432,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case VK_SPACE:
         case VK_RIGHT: g_app.modeIdx = (g_app.modeIdx + 1) % MODE_COUNT; break;
         case VK_LEFT:  g_app.modeIdx = (g_app.modeIdx + MODE_COUNT - 1) % MODE_COUNT; break;
+        case 'P':      g_app.paletteIdx = (g_app.paletteIdx + 1) % PAL_COUNT; break;
         case 'F':      g_app.ToggleFullscreen(); break;
         case 'H':      g_app.hud = !g_app.hud; break;
         case VK_ESCAPE: PostQuitMessage(0); break;
