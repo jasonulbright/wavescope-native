@@ -28,6 +28,12 @@ typedef BOOL(WINAPI* PFNWGLSWAPINTERVALEXTPROC)(int);
 #define GL_VERTEX_SHADER   0x8B31
 #define GL_COMPILE_STATUS  0x8B81
 #define GL_LINK_STATUS     0x8B82
+#ifndef GL_BGRA_EXT
+#define GL_BGRA_EXT 0x80E1
+#endif
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
 
 // GL 2.0+ / 3.0 functions resolved at runtime (not in opengl32's 1.1 exports).
 typedef GLuint(WINAPI* PFN_glCreateShader)(GLenum);
@@ -129,6 +135,8 @@ struct ShaderHost {
     ShaderProg progs[3] = {};
     bool ready = false;
     GLuint fontBase = 0;
+    GLuint overlayTex = 0;    // UI overlay uploaded from the D2D-rendered bitmap
+    int overlayW = 0, overlayH = 0;
     int cw = 1, ch = 1;
 
     // GL function pointers.
@@ -336,6 +344,35 @@ struct ShaderHost {
         glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
     }
 
+    // Composite the D2D-rendered UI overlay (premultiplied BGRA) as a
+    // full-window textured quad. Re-uploads only when `dirty`.
+    void DrawOverlayTex(const void* bgra, int tw, int th, bool dirty) {
+        glEnable(GL_TEXTURE_2D);
+        if (!overlayTex) glGenTextures(1, &overlayTex);
+        glBindTexture(GL_TEXTURE_2D, overlayTex);
+        if (dirty && bgra && tw > 0 && th > 0) {
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, bgra);
+            overlayW = tw; overlayH = th;
+        }
+        if (overlayW <= 0) { glDisable(GL_TEXTURE_2D); return; }
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);  // premultiplied alpha
+        glColor4f(1, 1, 1, 1);
+        glBegin(GL_QUADS);
+        glTexCoord2f(0, 0); glVertex2f(0, 0);
+        glTexCoord2f(1, 0); glVertex2f((float)cw, 0);
+        glTexCoord2f(1, 1); glVertex2f((float)cw, (float)ch);
+        glTexCoord2f(0, 1); glVertex2f(0, (float)ch);
+        glEnd();
+        glDisable(GL_BLEND);
+        glDisable(GL_TEXTURE_2D);
+    }
+
     void Present() {
         glDisable(GL_BLEND);
         glMatrixMode(GL_MODELVIEW); glPopMatrix();
@@ -345,7 +382,9 @@ struct ShaderHost {
     }
 
     void Destroy() {
-        if (fontBase && glrc) { wglMakeCurrent(dc, glrc); glDeleteLists(fontBase, 256); fontBase = 0; }
+        if (glrc) wglMakeCurrent(dc, glrc);
+        if (overlayTex) { glDeleteTextures(1, &overlayTex); overlayTex = 0; }
+        if (fontBase && glrc) { glDeleteLists(fontBase, 256); fontBase = 0; }
         if (glrc) { wglMakeCurrent(nullptr, nullptr); wglDeleteContext(glrc); glrc = nullptr; }
         if (child && dc) ReleaseDC(child, dc);
         if (child) DestroyWindow(child);

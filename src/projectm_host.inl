@@ -24,6 +24,14 @@ typedef BOOL(WINAPI* PFNWGLSWAPINTERVALEXTPROC)(int);
 #define WGL_CONTEXT_PROFILE_MASK_ARB 0x9126
 #define WGL_CONTEXT_COMPATIBILITY_PROFILE_BIT_ARB 0x00000002
 
+// GL tokens for the UI-overlay texture (not in the 1.1 gl.h on Windows).
+#ifndef GL_BGRA_EXT
+#define GL_BGRA_EXT 0x80E1
+#endif
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
 // GL 2.0+ entry points we need only to reset state before the legacy-GL HUD
 // overlay (loaded at runtime; not in opengl32.lib's 1.1 export set).
 typedef void(WINAPI* PFN_glUseProgram)(GLuint);
@@ -59,6 +67,8 @@ struct ProjectMHost {
     int presetIdx = 0;
     bool ready = false;
     GLuint fontBase = 0;      // wglUseFontBitmaps display-list base for the HUD
+    GLuint overlayTex = 0;    // UI overlay uploaded from the D2D-rendered bitmap
+    int overlayW = 0, overlayH = 0;
     int cw = 1, ch = 1;       // child client size, for the HUD ortho
     PFN_glUseProgram p_glUseProgram = nullptr;
     PFN_glBindVertexArray p_glBindVertexArray = nullptr;
@@ -258,6 +268,35 @@ struct ProjectMHost {
         glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
     }
 
+    // Composite the D2D-rendered UI overlay (premultiplied BGRA) as a
+    // full-window textured quad. Re-uploads only when `dirty`.
+    void DrawOverlayTex(const void* bgra, int tw, int th, bool dirty) {
+        glEnable(GL_TEXTURE_2D);
+        if (!overlayTex) glGenTextures(1, &overlayTex);
+        glBindTexture(GL_TEXTURE_2D, overlayTex);
+        if (dirty && bgra && tw > 0 && th > 0) {
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, bgra);
+            overlayW = tw; overlayH = th;
+        }
+        if (overlayW <= 0) { glDisable(GL_TEXTURE_2D); return; }
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);  // premultiplied alpha
+        glColor4f(1, 1, 1, 1);
+        glBegin(GL_QUADS);
+        glTexCoord2f(0, 0); glVertex2f(0, 0);
+        glTexCoord2f(1, 0); glVertex2f((float)cw, 0);
+        glTexCoord2f(1, 1); glVertex2f((float)cw, (float)ch);
+        glTexCoord2f(0, 1); glVertex2f(0, (float)ch);
+        glEnd();
+        glDisable(GL_BLEND);
+        glDisable(GL_TEXTURE_2D);
+    }
+
     void Present() {
         glDisable(GL_BLEND);
         glMatrixMode(GL_MODELVIEW); glPopMatrix();
@@ -268,7 +307,9 @@ struct ProjectMHost {
 
     void Destroy() {
         if (presetWatch && presetWatch != INVALID_HANDLE_VALUE) { FindCloseChangeNotification(presetWatch); presetWatch = nullptr; }
-        if (fontBase && glrc) { wglMakeCurrent(dc, glrc); glDeleteLists(fontBase, 256); fontBase = 0; }
+        if (glrc) wglMakeCurrent(dc, glrc);
+        if (overlayTex) { glDeleteTextures(1, &overlayTex); overlayTex = 0; }
+        if (fontBase && glrc) { glDeleteLists(fontBase, 256); fontBase = 0; }
         if (pm) { projectm_destroy(pm); pm = nullptr; }
         if (glrc) { wglMakeCurrent(nullptr, nullptr); wglDeleteContext(glrc); glrc = nullptr; }
         if (child && dc) ReleaseDC(child, dc);
