@@ -33,23 +33,32 @@ Requires Visual Studio 2026 (any edition) for the compiler. Output:
   math. Plasma and Waterfall use CPU pixel buffers blitted through D2D.
 - **Six trace palettes** (ultramarine, green phosphor, amber CRT, paper
   white, full spectrum, magma), cycled with `P`.
-- HUD, fullscreen toggle, mode + palette cycling. Still one dependency-free
-  static `.exe` (~240 KB).
+- **Real MilkDrop via projectM** (`M` key): libprojectM built for native
+  MSVC runs in a child window with its own WGL/OpenGL 3.3 context layered
+  over the Direct2D surface, fed PCM from the same loopback tap, rendering
+  raw `.milk` presets. `SPACE`/arrows cycle presets while it is active.
+  Bundled starters in `presets/`. Launch with `SpectraViz.exe milkdrop` to
+  boot straight into it.
+- HUD, fullscreen toggle, mode + palette cycling.
 
-Keys: `SPACE`/`RIGHT` next mode, `LEFT` prev, `P` palette, `F` fullscreen,
-`H` HUD, `ESC` quit.
+The core app is one `/MT` static `.exe` (~258 KB) with zero runtime deps.
+projectM is the one deliberate dependency (LGPL-2.1): `projectM-4.dll` +
+`projectM-4-playlist.dll` ship beside the exe (staged by `build.bat`), and
+they need the VC runtime (present wherever VS or the VC redist is installed).
+
+Keys: `SPACE`/`RIGHT` next (mode or preset), `LEFT` prev, `P` palette,
+`M` MilkDrop engine, `F` fullscreen, `H` HUD, `ESC` quit.
+
+projectM is built from `C:\projects\projectm` via `build-native.bat` there
+(MSVC/Ninja, shared DLL, installed to `install-native/`). `build.bat` links
+its import lib and stages the DLLs.
 
 ## Roadmap
 
-1. **MilkDrop via the Emscripten-portable engine.** Vendor projectM's
-   libprojectM: the maintained C++ MilkDrop lineage whose codebase is the
-   basis of the Emscripten builds. It renders through OpenGL, so this phase
-   adds a WGL context path alongside Direct2D (or migrates rendering to one
-   GL pipeline; decide when it lands). Raw `.milk` preset folder support.
-   Note: libprojectM is LGPL-2.1; link it as a DLL to keep obligations
-   simple, or evaluate static-link compliance then. (We already built
-   libprojectM to WASM for the web app; the native build targets MSVC and
-   links through a WGL/OpenGL context — see `C:\projects\projectm`.)
+1. **Preset library**: point projectM at a folder of raw `.milk` files (the
+   15-year archive), preset playlist via `projectM-4-playlist`, and preset
+   name in a GL-drawn or title-bar HUD (the D2D HUD is hidden under the GL
+   child while projectM is active).
 2. **Multi-monitor**: one borderless window + render loop per display
    (`EnumDisplayMonitors`), independent mode/palette per window, no
    permission prompts, no clicks.
@@ -71,3 +80,6 @@ Keys: `SPACE`/`RIGHT` next mode, `LEFT` prev, `P` palette, `F` fullscreen,
   - `DrawCtx` — the Direct2D primitives (rects, lines, circles, filled and
     stroked paths, transforms, CPU-buffer blit) mirroring the web `VizPaint`
   - `MODES[]` — the 34 modes; each is `void draw(DrawCtx&)`
+- `src/projectm_host.inl` — the MilkDrop engine host (included by main.cpp):
+  - `ProjectMHost` — child GL window, WGL 3.3 context bootstrap, the
+    projectM instance, PCM feed, `.milk` preset load/cycle
