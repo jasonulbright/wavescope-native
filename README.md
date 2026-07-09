@@ -92,7 +92,7 @@ feature:
 | GPU shader modes (plasma/tunnel/fractal) | done (G: real GLSL fragment shaders on the GL context) |
 | Multi-monitor (per-display windows) | done (`wall` flag: independent visual per screen) |
 | **On-screen control deck (auto-hiding)** | MISSING |
-| **Shortcuts / help overlay** | MISSING (static HUD only) |
+| Shortcuts / help overlay | done (F1 / ? keymap card; built-in-mode view) |
 | Landing / marketing page | N/A (desktop app) |
 | Reduced-motion fallback | N/A (desktop) |
 
@@ -134,9 +134,11 @@ feature:
    Without the flag it stays a single 1440×900 window as before. *Per-monitor
    config persistence is a later refinement — today the primary window's setup
    is what's saved.*
-7. **On-screen control deck.** Auto-hiding instrument deck (source, engine,
-   mode, preset, palette, resolution, shuffle), custom-drawn in the same
-   pipeline, replacing keyboard-only control; plus a `?` help overlay.
+7. **On-screen control deck.** *Help overlay DONE* — `F1` / `?` shows a
+   centered keymap card over the built-in modes. Still to do: an auto-hiding,
+   mouse-driven instrument deck (source, engine, mode, preset, palette,
+   resolution, shuffle) custom-drawn in the same pipeline, which also unlocks
+   the palette-shuffle include list + full color-stop palette editor.
 8. **Spotify.** WinHTTP PKCE with a localhost redirect for the connected
    one-button mode; capture stays via loopback.
 9. **Polish.** Tray icon, launch-at-login / kiosk flag, preset hot-reload.
