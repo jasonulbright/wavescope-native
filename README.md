@@ -53,21 +53,62 @@ projectM is built from `C:\projects\projectm` via `build-native.bat` there
 (MSVC/Ninja, shared DLL, installed to `install-native/`). `build.bat` links
 its import lib and stages the DLLs.
 
-## Roadmap
+## Feature parity with the web version
 
-1. **Preset library**: point projectM at a folder of raw `.milk` files (the
-   15-year archive), preset playlist via `projectM-4-playlist`, and preset
-   name in a GL-drawn or title-bar HUD (the D2D HUD is hidden under the GL
-   child while projectM is active).
-2. **Multi-monitor**: one borderless window + render loop per display
-   (`EnumDisplayMonitors`), independent mode/palette per window, no
-   permission prompts, no clicks.
-3. **The console deck**: source select (loopback device picker, mic),
-   shuffle timers, calm mode, resolution scaling; custom-drawn in the same
-   pipeline, instrument style (mist paper + ultramarine brand).
-4. **Spotify**: PKCE via WinHTTP with a localhost redirect; capture is
-   already invisible thanks to loopback.
-5. Tray icon, launch-at-login kiosk flag, `.milk`/preset hot-reload.
+The goal is 1:1 with WaveScope (the frozen web v2). Status of every web
+feature:
+
+| Web feature | Native status |
+|---|---|
+| 34 built-in modes (5 families) | done |
+| 6 trace palettes | done |
+| MilkDrop, raw `.milk` (projectM) | done (2 bundled presets so far) |
+| System-audio capture | done (WASAPI loopback) |
+| Fullscreen | done |
+| HUD / keyboard control | done (static HUD; deck UI pending) |
+| Demo signal source | done (key 3, or `SpectraViz demo`) |
+| Microphone source | done (key 2) |
+| **Audio-file source** | MISSING |
+| **Spotify (quick + PKCE)** | MISSING |
+| **Resolution targets (1080-8K)** | MISSING (renders at window size) |
+| **Shuffle timer (modes + palettes)** | MISSING |
+| **Calm mode (photosensitivity)** | MISSING |
+| **Custom palette creation** | MISSING |
+| **Settings / preset persistence** | MISSING |
+| **projectM preset library + upload** | MISSING (2 bundled only) |
+| **GPU shader modes (plasma/tunnel/fractal)** | MISSING (CPU plasma exists) |
+| **Multi-monitor (per-display windows)** | MISSING |
+| **On-screen control deck (auto-hiding)** | MISSING |
+| **Shortcuts / help overlay** | MISSING (static HUD only) |
+| Landing / marketing page | N/A (desktop app) |
+| Reduced-motion fallback | N/A (desktop) |
+
+## Roadmap (ordered for parity)
+
+1. **Audio input sources.** *(loopback, demo, mic done; keys 1/2/3.)*
+   Remaining: audio-file source (Media Foundation decode + render + analyze).
+2. **Playback controls.** Resolution targets (render-to-texture at
+   1080/1440/2160/4320 then scale), shuffle timer for modes and palettes
+   with an include list, calm mode (exclude the beat-burst modes + soften
+   the beat envelope).
+3. **Custom palettes + persistence.** Palette creation from color stops;
+   persist palettes, custom presets, and settings (calm/shuffle/last mode)
+   to a config file beside the exe.
+4. **projectM preset library.** Point projectM at a folder of raw `.milk`
+   files (the 15-year archive), playlist via `projectM-4-playlist`, browse +
+   cycle, preset name shown while the engine is active.
+5. **GPU shader modes.** Port the three WebGPU shaders (plasma field, warp
+   tunnel, fractal fold) to HLSL/D3D11 or GLSL on the existing GL context,
+   full-resolution per-pixel.
+6. **Multi-monitor.** One borderless window + render loop per display
+   (`EnumDisplayMonitors`), independent engine/mode/palette/resolution per
+   window (each captures loopback itself, so no cross-window streaming).
+7. **On-screen control deck.** Auto-hiding instrument deck (source, engine,
+   mode, preset, palette, resolution, shuffle), custom-drawn in the same
+   pipeline, replacing keyboard-only control; plus a `?` help overlay.
+8. **Spotify.** WinHTTP PKCE with a localhost redirect for the connected
+   one-button mode; capture stays via loopback.
+9. **Polish.** Tray icon, launch-at-login / kiosk flag, preset hot-reload.
 
 ## Source map
 

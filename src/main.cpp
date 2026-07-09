@@ -98,6 +98,17 @@ public:
 
     UINT32 SampleRate() const { return m_sampleRate; }
 
+    enum { SRC_LOOPBACK = 0, SRC_MIC = 1, SRC_DEMO = 2 };
+    void SetSource(int s) { m_source = s; }
+    int Source() const { return m_source.load(); }
+    const wchar_t* SourceName() const {
+        switch (m_source.load()) {
+        case SRC_MIC:  return L"MICROPHONE";
+        case SRC_DEMO: return L"DEMO";
+        default:       return L"SYSTEM AUDIO";
+        }
+    }
+
     // Snapshot the newest 2048 samples and analyze them.
     void Analyze(AudioFrame& f, float now) {
         float dt = now - m_lastT;
@@ -108,7 +119,12 @@ public:
         f.dt = dt;
 
         float window[2048];
-        {
+        if (m_source.load() == SRC_DEMO) {
+            // Synthesize a coherent window ending at the current time.
+            float sr = (float)(m_sampleRate ? m_sampleRate : 48000);
+            for (int i = 0; i < 2048; i++)
+                window[i] = DemoSynth((double)now - (double)(2048 - i) / sr);
+        } else {
             AcquireSRWLockShared(&m_lock);
             uint64_t w = m_writeIdx;
             for (int i = 0; i < 2048; i++) {
@@ -173,80 +189,99 @@ private:
         return ((AudioTap*)param)->Run();
     }
 
+    // The demo signal: a slow chord (saw + sine partials) with a bass kick,
+    // so the app is never dead-silent when no real audio is playing.
+    static float DemoSynth(double t) {
+        static const float roots[4] = { 110.0f, 130.81f, 98.0f, 146.83f };
+        int bar = (int)(t / 2.0);
+        float root = roots[((bar % 4) + 4) % 4];
+        const float ratios[5] = { 1.0f, 1.5f, 2.0f, 3.0f, 4.02f };
+        float s = 0.0f;
+        for (int k = 0; k < 5; k++) {
+            float freq = root * ratios[k];
+            float ph = (float)(t * freq - floor(t * freq));
+            float osc = ratios[k] < 2.0f ? (2.0f * ph - 1.0f) : sinf(TAU * ph);
+            s += osc * (0.18f / ratios[k]);
+        }
+        double kt = t - floor(t / 0.5) * 0.5;      // 0..0.5, kick every 500 ms
+        s += sinf(TAU * 55.0f * (float)t) * expf(-(float)kt * 9.0f) * 0.7f;
+        return s * 0.6f;
+    }
+
+    // Capture thread: (re)opens WASAPI for loopback or mic, and reinitializes
+    // when the source changes. Demo needs no capture (Analyze synthesizes).
     DWORD Run() {
-        HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        if (FAILED(hr)) return 1;
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        while (!m_quit) {
+            int src = m_source.load();
+            if (src == SRC_DEMO) { Sleep(30); continue; }
 
-        IMMDeviceEnumerator* devEnum = nullptr;
-        IMMDevice* device = nullptr;
-        IAudioClient* client = nullptr;
-        IAudioCaptureClient* capture = nullptr;
-        WAVEFORMATEX* fmt = nullptr;
+            IMMDeviceEnumerator* devEnum = nullptr;
+            IMMDevice* device = nullptr;
+            IAudioClient* client = nullptr;
+            IAudioCaptureClient* capture = nullptr;
+            WAVEFORMATEX* fmt = nullptr;
 
-        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                              __uuidof(IMMDeviceEnumerator), (void**)&devEnum);
-        if (SUCCEEDED(hr)) hr = devEnum->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-        if (SUCCEEDED(hr)) hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&client);
-        if (SUCCEEDED(hr)) hr = client->GetMixFormat(&fmt);
-        if (SUCCEEDED(hr)) {
-            m_sampleRate = fmt->nSamplesPerSec;
-            // 100 ms buffer, shared mode, LOOPBACK: capture what plays.
-            hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                    AUDCLNT_STREAMFLAGS_LOOPBACK,
-                                    1000000, 0, fmt, nullptr);
-        }
-        if (SUCCEEDED(hr)) hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&capture);
-        if (SUCCEEDED(hr)) hr = client->Start();
+            EDataFlow flow = (src == SRC_MIC) ? eCapture : eRender;
+            DWORD streamFlags = (src == SRC_MIC) ? 0 : AUDCLNT_STREAMFLAGS_LOOPBACK;
 
-        if (SUCCEEDED(hr)) {
-            const int channels = fmt->nChannels;
-            const bool isFloat =
-                fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
-                (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
-                 ((WAVEFORMATEXTENSIBLE*)fmt)->SubFormat.Data1 == 3 /* KSDATAFORMAT_SUBTYPE_IEEE_FLOAT */);
-
-            while (!m_quit) {
-                Sleep(5);
-                UINT32 packet = 0;
-                while (SUCCEEDED(capture->GetNextPacketSize(&packet)) && packet > 0) {
-                    BYTE* data = nullptr;
-                    UINT32 frames = 0;
-                    DWORD flags = 0;
-                    if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
-
-                    AcquireSRWLockExclusive(&m_lock);
-                    if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                        for (UINT32 i = 0; i < frames; i++)
-                            m_ring[(m_writeIdx++) % RING] = 0.0f;
-                    } else if (isFloat) {
-                        const float* s = (const float*)data;
-                        for (UINT32 i = 0; i < frames; i++) {
-                            float mono = channels > 1 ? (s[i * channels] + s[i * channels + 1]) * 0.5f
-                                                      : s[i];
-                            m_ring[(m_writeIdx++) % RING] = mono;
-                        }
-                    } else { // 16-bit PCM fallback
-                        const int16_t* s = (const int16_t*)data;
-                        for (UINT32 i = 0; i < frames; i++) {
-                            float l = s[i * channels] / 32768.0f;
-                            float r = channels > 1 ? s[i * channels + 1] / 32768.0f : l;
-                            m_ring[(m_writeIdx++) % RING] = (l + r) * 0.5f;
-                        }
-                    }
-                    ReleaseSRWLockExclusive(&m_lock);
-                    capture->ReleaseBuffer(frames);
-                }
+            HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                          __uuidof(IMMDeviceEnumerator), (void**)&devEnum);
+            if (SUCCEEDED(hr)) hr = devEnum->GetDefaultAudioEndpoint(flow, eConsole, &device);
+            if (SUCCEEDED(hr)) hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&client);
+            if (SUCCEEDED(hr)) hr = client->GetMixFormat(&fmt);
+            if (SUCCEEDED(hr)) {
+                m_sampleRate = fmt->nSamplesPerSec;
+                hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED, streamFlags, 1000000, 0, fmt, nullptr);
             }
-            client->Stop();
-        }
+            if (SUCCEEDED(hr)) hr = client->GetService(__uuidof(IAudioCaptureClient), (void**)&capture);
+            if (SUCCEEDED(hr)) hr = client->Start();
 
-        if (fmt) CoTaskMemFree(fmt);
-        SafeRelease(&capture);
-        SafeRelease(&client);
-        SafeRelease(&device);
-        SafeRelease(&devEnum);
+            if (SUCCEEDED(hr)) {
+                const int channels = fmt->nChannels;
+                const bool isFloat =
+                    fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
+                    (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+                     ((WAVEFORMATEXTENSIBLE*)fmt)->SubFormat.Data1 == 3);
+
+                while (!m_quit && m_source.load() == src) {
+                    Sleep(5);
+                    UINT32 packet = 0;
+                    while (SUCCEEDED(capture->GetNextPacketSize(&packet)) && packet > 0) {
+                        BYTE* data = nullptr; UINT32 frames = 0; DWORD flags = 0;
+                        if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
+                        AcquireSRWLockExclusive(&m_lock);
+                        if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                            for (UINT32 i = 0; i < frames; i++) m_ring[(m_writeIdx++) % RING] = 0.0f;
+                        } else if (isFloat) {
+                            const float* s = (const float*)data;
+                            for (UINT32 i = 0; i < frames; i++)
+                                m_ring[(m_writeIdx++) % RING] =
+                                    channels > 1 ? (s[i * channels] + s[i * channels + 1]) * 0.5f : s[i];
+                        } else {
+                            const int16_t* s = (const int16_t*)data;
+                            for (UINT32 i = 0; i < frames; i++) {
+                                float l = s[i * channels] / 32768.0f;
+                                float r = channels > 1 ? s[i * channels + 1] / 32768.0f : l;
+                                m_ring[(m_writeIdx++) % RING] = (l + r) * 0.5f;
+                            }
+                        }
+                        ReleaseSRWLockExclusive(&m_lock);
+                        capture->ReleaseBuffer(frames);
+                    }
+                }
+                client->Stop();
+            }
+
+            if (fmt) CoTaskMemFree(fmt);
+            SafeRelease(&capture);
+            SafeRelease(&client);
+            SafeRelease(&device);
+            SafeRelease(&devEnum);
+            if (FAILED(hr)) Sleep(200); // failed to open: pause before retry
+        }
         CoUninitialize();
-        return SUCCEEDED(hr) ? 0 : 1;
+        return 0;
     }
 
     // Iterative radix-2 Cooley-Tukey, N=2048.
@@ -281,6 +316,7 @@ private:
 
     HANDLE m_thread = nullptr;
     std::atomic<bool> m_quit{false};
+    std::atomic<int> m_source{ SRC_LOOPBACK };
     SRWLOCK m_lock = SRWLOCK_INIT;
     float m_ring[RING] = {};
     uint64_t m_writeIdx = 0;
@@ -390,9 +426,9 @@ struct App {
         mode.draw(g);
 
         if (hud && hudFont) {
-            wchar_t text[256];
-            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  FPS %d  LEVEL %.2f\nSPACE next  \x2190 prev  P palette  F fullscreen  H hud  ESC quit",
-                       modeIdx + 1, MODE_COUNT, mode.name, PALETTES[paletteIdx].name, fps, frame.level);
+            wchar_t text[320];
+            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  FPS %d  LEVEL %.2f\nSPACE next  \x2190 prev  P palette  1 system  2 mic  3 demo  M milkdrop  F full  H hud  ESC quit",
+                       modeIdx + 1, MODE_COUNT, mode.name, PALETTES[paletteIdx].name, tap.SourceName(), fps, frame.level);
             brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.75f));
             rt->DrawTextW(text, (UINT32)wcslen(text), hudFont,
                           D2D1::RectF(16, 12, size.width - 16, 80), brush);
@@ -473,6 +509,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else g_app.modeIdx = (g_app.modeIdx + MODE_COUNT - 1) % MODE_COUNT;
             break;
         case 'P':      g_app.paletteIdx = (g_app.paletteIdx + 1) % PAL_COUNT; break;
+        case '1':      g_app.tap.SetSource(AudioTap::SRC_LOOPBACK); break;
+        case '2':      g_app.tap.SetSource(AudioTap::SRC_MIC); break;
+        case '3':      g_app.tap.SetSource(AudioTap::SRC_DEMO); break;
         case 'M':      g_app.ToggleProjectM(); break;
         case 'F':      g_app.ToggleFullscreen(); break;
         case 'H':      g_app.hud = !g_app.hud; break;
@@ -508,7 +547,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
 
     ShowWindow(g_app.hwnd, nCmdShow);
 
-    // Launch straight into the MilkDrop engine with "milkdrop" on the command line.
+    // Command-line: "demo" starts on the synthetic signal, "milkdrop" boots
+    // straight into the projectM engine.
+    if (pCmdLine && wcsstr(pCmdLine, L"demo")) g_app.tap.SetSource(AudioTap::SRC_DEMO);
     if (pCmdLine && wcsstr(pCmdLine, L"milkdrop")) g_app.ToggleProjectM();
 
     // Render loop: D2D presents on vsync, so this paces itself at 60.
