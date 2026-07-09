@@ -58,6 +58,24 @@ static D2D1_COLOR_F PalPaper(float pos, float a)    { return Hsla(140, 0.06f, 0.
 static D2D1_COLOR_F PalSpectrum(float pos, float a) { return Hsla(fmodf(clampf(pos,0,1) * 300 + 220, 360), 0.70f, 0.60f, a); }
 static D2D1_COLOR_F PalMagma(float pos, float a)    { float p = clampf(pos,0,1); return Hsla(10 + p * 45, 0.70f + p * 0.20f, 0.30f + p * 0.45f, a); }
 
+// Custom palette: up to 3 interpolated RGB stops. One is active at a time, so
+// the stops live in globals that PalCustom reads (keeps the fast fn-pointer
+// palette design while allowing runtime, user-created palettes).
+static float g_customStops[3][3] = { { 0.2f, 0.27f, 0.79f }, {}, {} };
+static int g_customStopCount = 1;
+static D2D1_COLOR_F PalCustom(float pos, float a) {
+    pos = clampf(pos, 0, 1);
+    int n = g_customStopCount;
+    if (n <= 1) return D2D1::ColorF(g_customStops[0][0], g_customStops[0][1], g_customStops[0][2], a);
+    float t = pos * (n - 1);
+    int i = (int)t; if (i > n - 2) i = n - 2;
+    float f = t - i;
+    return D2D1::ColorF(
+        g_customStops[i][0] + (g_customStops[i + 1][0] - g_customStops[i][0]) * f,
+        g_customStops[i][1] + (g_customStops[i + 1][1] - g_customStops[i][1]) * f,
+        g_customStops[i][2] + (g_customStops[i + 1][2] - g_customStops[i][2]) * f, a);
+}
+
 struct Palette { const wchar_t* name; D2D1_COLOR_F (*color)(float, float); };
 static const Palette PALETTES[] = {
     { L"ULTRAMARINE",   PalPhosphor },

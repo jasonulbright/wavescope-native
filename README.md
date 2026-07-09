@@ -47,7 +47,10 @@ projectM is the one deliberate dependency (LGPL-2.1): `projectM-4.dll` +
 they need the VC runtime (present wherever VS or the VC redist is installed).
 
 Keys: `SPACE`/`RIGHT` next (mode or preset), `LEFT` prev, `P` palette,
-`M` MilkDrop engine, `F` fullscreen, `H` HUD, `ESC` quit.
+`N` new custom palette (color picker), `1`/`2`/`3` source (loopback/mic/demo),
+`4` open audio file, `S` shuffle timer, `C` calm mode, `R` resolution target,
+`L` MilkDrop preset folder, `M` MilkDrop engine, `F` fullscreen, `H` HUD,
+`ESC` quit. Settings and custom palettes persist to `spectraviz.ini`.
 
 projectM is built from `C:\projects\projectm` via `build-native.bat` there
 (MSVC/Ninja, shared DLL, installed to `install-native/`). `build.bat` links
@@ -73,8 +76,8 @@ feature:
 | Resolution targets (1080-8K) | done (key R; offscreen render + scale) |
 | Shuffle timer | done for modes (key S); palette-shuffle + include list with the deck |
 | Calm mode (photosensitivity) | done (key C) |
-| **Custom palette creation** | MISSING |
-| **Settings / preset persistence** | MISSING |
+| Custom palette creation | done (N: pick 1-3 colors; full stop editor with deck) |
+| Settings / preset persistence | done (spectraviz.ini beside the exe) |
 | projectM preset library | done (scans a folder of .milk; L picks your archive) |
 | **GPU shader modes (plasma/tunnel/fractal)** | MISSING (CPU plasma exists) |
 | **Multi-monitor (per-display windows)** | MISSING |
@@ -94,9 +97,12 @@ feature:
    mode (C: excludes the 5 beat-burst modes + softens the beat envelope).
    *Palette-shuffle + the per-palette include list come with the deck (step
    7), since they need UI.*
-3. **Custom palettes + persistence.** Palette creation from color stops;
-   persist palettes, custom presets, and settings (calm/shuffle/last mode)
-   to a config file beside the exe.
+3. ~~**Custom palettes + persistence.**~~ DONE. `N` builds a custom palette
+   from up to 3 colors via the standard Windows color picker (cancel to stop
+   early); it joins the `P` rotation. Settings (mode, palette, resolution,
+   shuffle, calm) + custom palettes persist to `spectraviz.ini` beside the
+   exe, restored on launch. *A richer color-stop editor arrives with the
+   deck (step 7); source is intentionally not restored (starts on loopback).*
 4. ~~**projectM preset library.**~~ DONE. Scans a folder of raw `.milk`
    files and cycles all of them (SPACE/arrows/shuffle); `L` picks your own
    archive folder; preset name + count shown in the title bar. (Native has

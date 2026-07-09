@@ -486,6 +486,11 @@ static const ResOpt RES_OPTS[] = {
 };
 static const int RES_COUNT = (int)(sizeof(RES_OPTS) / sizeof(RES_OPTS[0]));
 
+// A user-created palette: 1-3 RGB stops (0..1), persisted to the config file.
+struct CustomPalette { std::wstring name; int n = 1; float stops[3][3] = {}; };
+
+static int Clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
 struct App {
     HWND hwnd = nullptr;
     ID2D1Factory* d2d = nullptr;
@@ -500,6 +505,7 @@ struct App {
     ID2D1BitmapRenderTarget* offscreen = nullptr;
     ID2D1SolidColorBrush* offBrush = nullptr;
     UINT offW = 0, offH = 0;
+    std::vector<CustomPalette> customPalettes;
     int modeIdx = 0;
     int paletteIdx = 0;
     int resIdx = 0;          // index into RES_OPTS
@@ -620,7 +626,7 @@ struct App {
         offscreen->BeginDraw();
         offBrush->SetColor(D2D1::ColorF(0.043f, 0.051f, 0.047f, mode.fade));
         offscreen->FillRectangle(D2D1::RectF(0, 0, (float)offW, (float)offH), offBrush);
-        DrawCtx g{ offscreen, d2d, offBrush, PALETTES[paletteIdx].color, (float)offW, (float)offH, &frame };
+        DrawCtx g{ offscreen, d2d, offBrush, PaletteFn(), (float)offW, (float)offH, &frame };
         mode.draw(g);
         offscreen->EndDraw();
 
@@ -637,8 +643,8 @@ struct App {
         if (hud && hudFont) {
             wchar_t text[360];
             static const wchar_t* shuf[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
-            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  1 sys  2 mic  3 demo  4 file  R res  S shuffle  C calm  M milkdrop  F full  H hud  ESC",
-                       modeIdx + 1, MODE_COUNT, mode.name, PALETTES[paletteIdx].name, tap.SourceName(),
+            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  N new-palette  1-4 source  R res  S shuffle  C calm  M milkdrop  F full  H hud  ESC",
+                       modeIdx + 1, MODE_COUNT, mode.name, PaletteName(), tap.SourceName(),
                        RES_OPTS[resIdx].name, offW, offH, shuf[shuffleIdx], calm ? L"  CALM" : L"", fps, frame.level);
             brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.75f));
             rt->DrawTextW(text, (UINT32)wcslen(text), hudFont,
@@ -749,6 +755,116 @@ struct App {
     }
 
     void CycleShuffle() { shuffleIdx = (shuffleIdx + 1) % SHUFFLE_COUNT; lastShuffle = Now(); }
+
+    // ----- palettes (built-in + user-created) -----
+
+    int PaletteCount() const { return PAL_COUNT + (int)customPalettes.size(); }
+    const wchar_t* PaletteName() const {
+        return paletteIdx < PAL_COUNT ? PALETTES[paletteIdx].name
+                                      : customPalettes[paletteIdx - PAL_COUNT].name.c_str();
+    }
+    // Resolve the active palette's color fn, priming the custom-stop globals.
+    D2D1_COLOR_F (*PaletteFn())(float, float) {
+        if (paletteIdx < PAL_COUNT) return PALETTES[paletteIdx].color;
+        const CustomPalette& cp = customPalettes[paletteIdx - PAL_COUNT];
+        g_customStopCount = cp.n;
+        for (int i = 0; i < cp.n; i++)
+            for (int c = 0; c < 3; c++) g_customStops[i][c] = cp.stops[i][c];
+        return PalCustom;
+    }
+    void CyclePalette() { paletteIdx = (paletteIdx + 1) % PaletteCount(); }
+
+    // Create a palette from up to 3 colors via the standard picker (cancel to
+    // stop early). A full stop editor arrives with the on-screen deck.
+    void NewPalette() {
+        static COLORREF customColors[16] = {};
+        CustomPalette cp; cp.n = 0;
+        COLORREF seed[3] = { RGB(51, 70, 201), RGB(122, 224, 195), RGB(242, 244, 241) };
+        for (int s = 0; s < 3; s++) {
+            CHOOSECOLORW cc = {};
+            cc.lStructSize = sizeof(cc);
+            cc.hwndOwner = hwnd;
+            cc.lpCustColors = customColors;
+            cc.rgbResult = seed[s];
+            cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+            if (!ChooseColorW(&cc)) break;
+            cp.stops[cp.n][0] = GetRValue(cc.rgbResult) / 255.0f;
+            cp.stops[cp.n][1] = GetGValue(cc.rgbResult) / 255.0f;
+            cp.stops[cp.n][2] = GetBValue(cc.rgbResult) / 255.0f;
+            cp.n++;
+        }
+        if (cp.n < 1) return;
+        wchar_t nm[24]; swprintf_s(nm, L"CUSTOM %d", (int)customPalettes.size() + 1);
+        cp.name = nm;
+        customPalettes.push_back(cp);
+        paletteIdx = PAL_COUNT + (int)customPalettes.size() - 1;
+        SaveConfig();
+    }
+
+    // ----- settings persistence (spectraviz.ini beside the exe) -----
+
+    std::wstring ConfigPath() const { return PmExeDir() + L"spectraviz.ini"; }
+
+    void SaveConfig() {
+        std::wstring path = ConfigPath();
+        auto wi = [&](const wchar_t* k, int v) {
+            wchar_t b[16]; _itow_s(v, b, 10);
+            WritePrivateProfileStringW(L"settings", k, b, path.c_str());
+        };
+        wi(L"mode", modeIdx); wi(L"palette", paletteIdx); wi(L"resolution", resIdx);
+        wi(L"shuffle", shuffleIdx); wi(L"calm", calm ? 1 : 0);
+        wchar_t cnt[16]; _itow_s((int)customPalettes.size(), cnt, 10);
+        WritePrivateProfileStringW(L"palettes", L"count", cnt, path.c_str());
+        for (size_t i = 0; i < customPalettes.size(); i++) {
+            const CustomPalette& cp = customPalettes[i];
+            std::wstring val = cp.name + L"|";
+            for (int s = 0; s < cp.n; s++) {
+                wchar_t hx[10];
+                swprintf_s(hx, L"%02x%02x%02x", (int)(cp.stops[s][0] * 255 + 0.5f),
+                           (int)(cp.stops[s][1] * 255 + 0.5f), (int)(cp.stops[s][2] * 255 + 0.5f));
+                if (s) val += L",";
+                val += hx;
+            }
+            wchar_t key[16]; swprintf_s(key, L"p%d", (int)i);
+            WritePrivateProfileStringW(L"palettes", key, val.c_str(), path.c_str());
+        }
+    }
+
+    void LoadConfig() {
+        std::wstring path = ConfigPath();
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+        int cnt = GetPrivateProfileIntW(L"palettes", L"count", 0, path.c_str());
+        for (int i = 0; i < cnt && i < 64; i++) {
+            wchar_t key[16]; swprintf_s(key, L"p%d", i);
+            wchar_t buf[160];
+            GetPrivateProfileStringW(L"palettes", key, L"", buf, 160, path.c_str());
+            std::wstring v = buf;
+            size_t bar = v.find(L'|');
+            if (bar == std::wstring::npos) continue;
+            CustomPalette cp; cp.name = v.substr(0, bar); cp.n = 0;
+            std::wstring hexes = v.substr(bar + 1);
+            size_t pos = 0;
+            while (cp.n < 3 && pos < hexes.size()) {
+                size_t comma = hexes.find(L',', pos);
+                std::wstring h = hexes.substr(pos, comma == std::wstring::npos ? comma : comma - pos);
+                if (h.size() >= 6) {
+                    unsigned int rgb = wcstoul(h.c_str(), nullptr, 16);
+                    cp.stops[cp.n][0] = ((rgb >> 16) & 255) / 255.0f;
+                    cp.stops[cp.n][1] = ((rgb >> 8) & 255) / 255.0f;
+                    cp.stops[cp.n][2] = (rgb & 255) / 255.0f;
+                    cp.n++;
+                }
+                if (comma == std::wstring::npos) break;
+                pos = comma + 1;
+            }
+            if (cp.n >= 1) customPalettes.push_back(cp);
+        }
+        modeIdx = Clampi(GetPrivateProfileIntW(L"settings", L"mode", 0, path.c_str()), 0, MODE_COUNT - 1);
+        paletteIdx = Clampi(GetPrivateProfileIntW(L"settings", L"palette", 0, path.c_str()), 0, PaletteCount() - 1);
+        resIdx = Clampi(GetPrivateProfileIntW(L"settings", L"resolution", 0, path.c_str()), 0, RES_COUNT - 1);
+        shuffleIdx = Clampi(GetPrivateProfileIntW(L"settings", L"shuffle", 0, path.c_str()), 0, SHUFFLE_COUNT - 1);
+        calm = GetPrivateProfileIntW(L"settings", L"calm", 0, path.c_str()) != 0;
+    }
 };
 
 static App g_app;
@@ -772,7 +888,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_app.pmActive) g_app.pmHost.NextPreset(-1);
             else g_app.CycleMode(-1);
             break;
-        case 'P':      g_app.paletteIdx = (g_app.paletteIdx + 1) % PAL_COUNT; break;
+        case 'P':      g_app.CyclePalette(); break;
+        case 'N':      g_app.NewPalette(); break;
         case '1':      g_app.tap.SetSource(AudioTap::SRC_LOOPBACK); break;
         case '2':      g_app.tap.SetSource(AudioTap::SRC_MIC); break;
         case '3':      g_app.tap.SetSource(AudioTap::SRC_DEMO); break;
@@ -814,6 +931,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
 
     if (!g_app.CreateGraphics()) return 1;
     g_app.tap.Start();
+    g_app.LoadConfig(); // restore mode/palette/resolution/shuffle/calm + custom palettes
 
     ShowWindow(g_app.hwnd, nCmdShow);
 
@@ -834,6 +952,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
         g_app.Render();
     }
 done:
+    g_app.SaveConfig(); // remember the setup for next launch
     g_app.pmHost.Destroy();
     g_app.tap.Stop();
     g_app.ReleaseOffscreen();
