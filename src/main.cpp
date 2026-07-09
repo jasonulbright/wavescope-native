@@ -475,6 +475,10 @@ static float BinLog(const AudioFrame& f, float pos) {
 
 // --------------------------------------------------------------------- app
 
+// Shuffle timer choices, in seconds; 0 = off.
+static const int SHUFFLE_SECS[] = { 0, 15, 30, 60, 300 };
+static const int SHUFFLE_COUNT = (int)(sizeof(SHUFFLE_SECS) / sizeof(SHUFFLE_SECS[0]));
+
 struct App {
     HWND hwnd = nullptr;
     ID2D1Factory* d2d = nullptr;
@@ -488,6 +492,9 @@ struct App {
     bool pmActive = false;
     int modeIdx = 0;
     int paletteIdx = 0;
+    bool calm = false;
+    int shuffleIdx = 0;      // index into SHUFFLE_SECS
+    float lastShuffle = 0;
     bool hud = true;
     bool fullscreen = false;
     WINDOWPLACEMENT savedPlacement = { sizeof(WINDOWPLACEMENT) };
@@ -534,8 +541,16 @@ struct App {
         D2D1_SIZE_F size = rt->GetSize();
         float now = Now();
 
+        // Shuffle timer: hop to a random other visual (or preset) on interval.
+        if (SHUFFLE_SECS[shuffleIdx] > 0 && now - lastShuffle >= (float)SHUFFLE_SECS[shuffleIdx]) {
+            lastShuffle = now;
+            if (pmActive) pmHost.NextPreset(1);
+            else modeIdx = PickRandomMode();
+        }
+
         AudioFrame frame;
         tap.Analyze(frame, now);
+        if (calm) frame.beat *= 0.2f; // photosensitivity: tame the pulse
 
         // projectM engine: render OpenGL on the child window instead of D2D.
         if (pmActive && pmHost.ready) {
@@ -556,9 +571,11 @@ struct App {
         mode.draw(g);
 
         if (hud && hudFont) {
-            wchar_t text[320];
-            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  FPS %d  LEVEL %.2f\nSPACE next  \x2190 prev  P palette  1 system  2 mic  3 demo  4 file  M milkdrop  F full  H hud  ESC quit",
-                       modeIdx + 1, MODE_COUNT, mode.name, PALETTES[paletteIdx].name, tap.SourceName(), fps, frame.level);
+            wchar_t text[360];
+            static const wchar_t* shuf[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
+            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  1 sys  2 mic  3 demo  4 file  S shuffle  C calm  M milkdrop  F full  H hud  ESC",
+                       modeIdx + 1, MODE_COUNT, mode.name, PALETTES[paletteIdx].name, tap.SourceName(),
+                       shuf[shuffleIdx], calm ? L"  CALM" : L"", fps, frame.level);
             brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.75f));
             rt->DrawTextW(text, (UINT32)wcslen(text), hudFont,
                           D2D1::RectF(16, 12, size.width - 16, 80), brush);
@@ -629,6 +646,30 @@ struct App {
             SetWindowTextW(hwnd, L"SpectraViz");
         }
     }
+
+    // Advance the mode, skipping beat-burst modes while calm mode is on.
+    void CycleMode(int dir) {
+        for (int step = 0; step < MODE_COUNT; step++) {
+            modeIdx = (modeIdx + dir + MODE_COUNT) % MODE_COUNT;
+            if (!calm || !MODES[modeIdx].flash) return;
+        }
+    }
+
+    // A random mode other than the current one (non-flash while calm).
+    int PickRandomMode() {
+        for (int tries = 0; tries < 64; tries++) {
+            int i = rand() % MODE_COUNT;
+            if (i != modeIdx && (!calm || !MODES[i].flash)) return i;
+        }
+        return modeIdx;
+    }
+
+    void SetCalm(bool c) {
+        calm = c;
+        if (calm && MODES[modeIdx].flash) CycleMode(1);
+    }
+
+    void CycleShuffle() { shuffleIdx = (shuffleIdx + 1) % SHUFFLE_COUNT; lastShuffle = Now(); }
 };
 
 static App g_app;
@@ -646,17 +687,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case VK_SPACE:
         case VK_RIGHT:
             if (g_app.pmActive) g_app.pmHost.NextPreset(1);
-            else g_app.modeIdx = (g_app.modeIdx + 1) % MODE_COUNT;
+            else g_app.CycleMode(1);
             break;
         case VK_LEFT:
             if (g_app.pmActive) g_app.pmHost.NextPreset(-1);
-            else g_app.modeIdx = (g_app.modeIdx + MODE_COUNT - 1) % MODE_COUNT;
+            else g_app.CycleMode(-1);
             break;
         case 'P':      g_app.paletteIdx = (g_app.paletteIdx + 1) % PAL_COUNT; break;
         case '1':      g_app.tap.SetSource(AudioTap::SRC_LOOPBACK); break;
         case '2':      g_app.tap.SetSource(AudioTap::SRC_MIC); break;
         case '3':      g_app.tap.SetSource(AudioTap::SRC_DEMO); break;
         case '4':      g_app.OpenFile(); break;
+        case 'S':      g_app.CycleShuffle(); break;
+        case 'C':      g_app.SetCalm(!g_app.calm); break;
         case 'M':      g_app.ToggleProjectM(); break;
         case 'F':      g_app.ToggleFullscreen(); break;
         case 'H':      g_app.hud = !g_app.hud; break;
