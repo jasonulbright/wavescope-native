@@ -19,6 +19,7 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -40,6 +41,8 @@
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
 #pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "shell32.lib")
 
 // ---------------------------------------------------------------- utilities
 
@@ -827,8 +830,9 @@ struct App {
             L"F              fullscreen        H   HUD on/off\n"
             L"F1 / ?         this help         ESC quit\n"
             L"\n"
-            L"Launch: SpectraViz.exe [demo | file=PATH | milkdrop | shader | wall]";
-        float w = 560, h = 400;
+            L"Launch: SpectraViz.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
+            L"        [install-startup | remove-startup]   \x2014   tray icon: right-click";
+        float w = 600, h = 424;
         float x = (size.width - w) * 0.5f, y = (size.height - h) * 0.5f;
         if (x < 0) x = 0; if (y < 0) y = 0;
         D2D1_ROUNDED_RECT card = { D2D1::RectF(x, y, x + w, y + h), 10, 10 };
@@ -1091,6 +1095,68 @@ static App* AppFromHwnd(HWND h) {
     return (App*)GetWindowLongPtrW(h, GWLP_USERDATA);
 }
 
+// ----- polish: tray icon, kiosk cursor-hide, launch-at-login -----
+
+#define WM_TRAY       (WM_APP + 1)
+#define IDM_TRAY_SHOW 1
+#define IDM_TRAY_QUIT 2
+
+static NOTIFYICONDATAW g_tray = {};
+static bool g_trayAdded = false;
+static bool g_borderless = false;   // wall / kiosk: fullscreen-style windows
+static bool g_cursorHidden = false;
+static POINT g_lastCursor = {};
+static float g_lastMouseMove = 0;
+
+static void TrayAdd(HWND hwnd) {
+    g_tray.cbSize = sizeof(g_tray);
+    g_tray.hWnd = hwnd;
+    g_tray.uID = 1;
+    g_tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_tray.uCallbackMessage = WM_TRAY;
+    g_tray.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wcscpy_s(g_tray.szTip, L"SpectraViz");
+    if (Shell_NotifyIconW(NIM_ADD, &g_tray)) g_trayAdded = true;
+}
+
+static void TrayRemove() {
+    if (g_trayAdded) { Shell_NotifyIconW(NIM_DELETE, &g_tray); g_trayAdded = false; }
+}
+
+// Add or remove the HKCU Run entry (invoked only via an explicit command-line
+// action the user runs deliberately).
+static void SetAutoStart(bool on) {
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_SET_VALUE, &k) != ERROR_SUCCESS) return;
+    if (on) {
+        wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring cmd = std::wstring(L"\"") + exe + L"\"";
+        RegSetValueExW(k, L"SpectraViz", 0, REG_SZ, (const BYTE*)cmd.c_str(),
+                       (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
+        MessageBoxW(nullptr, L"SpectraViz will now launch at login.", L"SpectraViz",
+                    MB_OK | MB_ICONINFORMATION);
+    } else {
+        RegDeleteValueW(k, L"SpectraViz");
+        MessageBoxW(nullptr, L"SpectraViz login launch removed.", L"SpectraViz",
+                    MB_OK | MB_ICONINFORMATION);
+    }
+    RegCloseKey(k);
+}
+
+// Hide the cursor after it sits idle over a fullscreen-style window; any
+// movement brings it back. Polled (works over the GL child windows too).
+static void UpdateCursorHide(float now) {
+    POINT cp; GetCursorPos(&cp);
+    if (cp.x != g_lastCursor.x || cp.y != g_lastCursor.y) {
+        g_lastCursor = cp; g_lastMouseMove = now;
+        if (g_cursorHidden) { while (ShowCursor(TRUE) < 0) {} g_cursorHidden = false; }
+    } else if (g_borderless && !g_cursorHidden && now - g_lastMouseMove > 3.0f) {
+        while (ShowCursor(FALSE) >= 0) {}
+        g_cursorHidden = true;
+    }
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_NCCREATE) {
         // Bind the App* passed as CreateWindow's lpParam to this window.
@@ -1145,6 +1211,31 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case VK_ESCAPE: PostQuitMessage(0); break;  // ESC on any window quits all
         }
         return 0;
+    case WM_TRAY:
+        if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {
+            POINT pt; GetCursorPos(&pt);
+            HMENU m = CreatePopupMenu();
+            AppendMenuW(m, MF_STRING, IDM_TRAY_SHOW, IsWindowVisible(hwnd) ? L"Hide" : L"Show");
+            AppendMenuW(m, MF_STRING, IDM_TRAY_QUIT, L"Quit");
+            SetForegroundWindow(hwnd);
+            TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
+            DestroyMenu(m);
+        } else if (LOWORD(lp) == WM_LBUTTONDBLCLK) {
+            ShowWindow(hwnd, IsWindowVisible(hwnd) ? SW_HIDE : SW_SHOW);
+            if (IsWindowVisible(hwnd)) SetForegroundWindow(hwnd);
+        }
+        return 0;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDM_TRAY_SHOW) {
+            ShowWindow(hwnd, IsWindowVisible(hwnd) ? SW_HIDE : SW_SHOW);
+            if (IsWindowVisible(hwnd)) SetForegroundWindow(hwnd);
+        } else if (LOWORD(wp) == IDM_TRAY_QUIT) {
+            PostQuitMessage(0);
+        }
+        return 0;
+    case WM_SYSCOMMAND:
+        if ((wp & 0xFFF0) == SC_MINIMIZE && g_trayAdded) { ShowWindow(hwnd, SW_HIDE); return 0; }
+        break;  // other syscommands fall through to DefWindowProc
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -1182,6 +1273,10 @@ static BOOL CALLBACK CollectMonitor(HMONITOR mon, HDC, LPRECT, LPARAM lp) {
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // UI-thread shell dialogs
 
+    // Explicit launch-at-login toggles (user runs these deliberately).
+    if (pCmdLine && wcsstr(pCmdLine, L"install-startup")) { SetAutoStart(true);  return 0; }
+    if (pCmdLine && wcsstr(pCmdLine, L"remove-startup"))  { SetAutoStart(false); return 0; }
+
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
@@ -1189,18 +1284,25 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
     wc.lpszClassName = L"SpectraVizWindow";
     RegisterClassW(&wc);
 
-    // "wall" spreads one borderless window across every display (video wall,
-    // independent visuals per screen). Otherwise a single 1440x900 window.
+    // "wall" spreads one borderless window across every display (video wall).
+    // "kiosk" is a single borderless full-screen window on the primary display
+    // with an idle cursor-hide. Otherwise a single 1440x900 window.
     bool wall = pCmdLine && wcsstr(pCmdLine, L"wall");
+    bool kiosk = pCmdLine && wcsstr(pCmdLine, L"kiosk");
+    g_borderless = wall || kiosk;
     std::vector<RECT> monitors;
     if (wall) {
         EnumDisplayMonitors(nullptr, nullptr, CollectMonitor, (LPARAM)&monitors);
+    } else if (kiosk) {
+        MONITORINFO mi = { sizeof(MONITORINFO) };
+        if (GetMonitorInfoW(MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), &mi))
+            monitors.push_back(mi.rcMonitor);
     }
     if (monitors.empty()) monitors.push_back(RECT{ CW_USEDEFAULT, CW_USEDEFAULT,
                                                    CW_USEDEFAULT + 1440, CW_USEDEFAULT + 900 });
 
     for (size_t i = 0; i < monitors.size(); i++) {
-        App* v = CreateView(hInstance, wc.lpszClassName, monitors[i], wall, nCmdShow);
+        App* v = CreateView(hInstance, wc.lpszClassName, monitors[i], g_borderless, nCmdShow);
         if (!v) { if (i == 0) return 1; else continue; }
         // Video wall: give each extra screen a distinct starting visual.
         if (wall && i > 0) {
@@ -1209,6 +1311,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
         }
     }
     if (g_views.empty()) return 1;
+    TrayAdd(g_views[0]->hwnd); // one tray icon for the app (primary window)
 
     // Command-line, applied to every window: "demo" synthetic signal,
     // "file=<path>" playback, "milkdrop"/"shader" boot into those engines.
@@ -1228,10 +1331,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-        for (App* v : g_views) v->Render();
+        for (App* v : g_views) {
+            v->Render();
+            if (v->pmHost.ready) v->pmHost.PollReload(); // hot-reload .milk folder
+        }
+        UpdateCursorHide(g_views[0]->Now());
     }
 done:
     if (!g_views.empty()) g_views[0]->SaveConfig(); // primary window's setup persists
+    if (g_cursorHidden) { while (ShowCursor(TRUE) < 0) {} g_cursorHidden = false; }
+    TrayRemove();
     for (App* v : g_views) { v->Shutdown(); delete v; }
     g_views.clear();
     return 0;

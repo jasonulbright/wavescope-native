@@ -60,7 +60,12 @@ Keys: `SPACE`/`RIGHT` next (mode or preset), `LEFT` prev, `P` palette,
 
 Launch flags: `demo` (synthetic signal), `file=<path>` (play a file),
 `milkdrop` / `shader` (boot into that engine), `wall` (borderless video wall
-across every display — keys act on the focused window, `ESC` quits all).
+across every display — keys act on the focused window, `ESC` quits all),
+`kiosk` (single borderless full-screen window on the primary display with an
+idle cursor-hide), `install-startup` / `remove-startup` (add/remove the
+launch-at-login entry, then exit). A system-tray icon (right-click →
+Show / Hide / Quit; minimize hides to tray) and MilkDrop preset hot-reload
+(drop `.milk` files into the watched folder and they appear live) round it out.
 
 projectM is built from `C:\projects\projectm` via `build-native.bat` there
 (MSVC/Ninja, shared DLL, installed to `install-native/`). `build.bat` links
@@ -145,7 +150,12 @@ feature:
    which the deck will host.
 8. **Spotify.** WinHTTP PKCE with a localhost redirect for the connected
    one-button mode; capture stays via loopback.
-9. **Polish.** Tray icon, launch-at-login / kiosk flag, preset hot-reload.
+9. ~~**Polish.**~~ DONE. System-tray icon (right-click → Show / Hide / Quit;
+   minimize hides to tray), `kiosk` flag (borderless full-screen on the
+   primary display + idle cursor auto-hide), `install-startup` /
+   `remove-startup` launch-at-login toggles (HKCU Run, run deliberately), and
+   MilkDrop preset hot-reload (`FindFirstChangeNotification` on the watched
+   `.milk` folder — dropped/removed presets update the library live).
 
 ## Beyond parity (optional, not required for 1:1)
 
