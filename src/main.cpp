@@ -20,6 +20,7 @@
 #include <audioclient.h>
 #include <commdlg.h>
 #include <shellapi.h>
+#include <wincodec.h>
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -43,6 +44,7 @@
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "windowscodecs.lib")
 
 // ---------------------------------------------------------------- utilities
 
@@ -479,68 +481,6 @@ static float BinLog(const AudioFrame& f, float pos) {
 #include "shader_host.inl"
 #include "spotify.inl"
 
-// OpenGL backend for the shared UI painter. Defined here (not in the host
-// files) so it lands once, after <GL/gl.h> has been pulled in by the hosts.
-// Draws with legacy fixed-function GL; the caller (a GL host) has already made
-// its context current, reset shader/VAO state, and set an ortho projection.
-struct GLPainter : UIPainter {
-    float cw, ch;
-    GLuint font;   // wglUseFontBitmaps display-list base (glyphs 0..255)
-    GLPainter(float w, float h, GLuint f) : cw(w), ch(h), font(f) {}
-
-    float W() override { return cw; }
-    float H() override { return ch; }
-
-    void Rect(float x, float y, float w, float h,
-              float r, float g, float b, float a, bool /*round*/) override {
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glColor4f(r, g, b, a);
-        glBegin(GL_QUADS);
-        glVertex2f(x, y); glVertex2f(x + w, y); glVertex2f(x + w, y + h); glVertex2f(x, y + h);
-        glEnd();
-    }
-
-    void Text(float x, float y, float w, float h, const wchar_t* s,
-              float r, float g, float b, float a, bool center) override {
-        if (!font || !s) return;
-        // The bitmap font only has glyphs 0..255, so fold the few non-Latin-1
-        // glyphs we use (arrows, em dash) down to ASCII, split on newlines.
-        const float chW = 7.0f, lineH = 18.0f;  // Consolas ~13px advance/leading
-        glColor4f(r, g, b, a);
-        glListBase(font);
-        std::string line;
-        float ly = y + 14.0f;
-        auto flush = [&]() {
-            if (!line.empty() || true) {
-                float lx = x + 2.0f;
-                if (center) {
-                    lx = x + (w - (float)line.size() * chW) * 0.5f;
-                    float cy = y + (h - lineH) * 0.5f + 13.0f;
-                    glRasterPos2f(lx, cy);
-                } else {
-                    glRasterPos2f(lx, ly);
-                }
-                if (!line.empty())
-                    glCallLists((GLsizei)line.size(), GL_UNSIGNED_BYTE, line.data());
-            }
-            line.clear(); ly += lineH;
-        };
-        for (const wchar_t* p = s; *p; ++p) {
-            wchar_t c = *p;
-            if (c == L'\n') { flush(); continue; }
-            char a2;
-            if (c == 0x2039 || c == 0x2190 || c == 0x2308) a2 = '<';
-            else if (c == 0x203A || c == 0x2192) a2 = '>';
-            else if (c == 0x2014 || c == 0x2013) a2 = '-';
-            else if (c > 255) a2 = ' ';
-            else a2 = (char)c;
-            line += a2;
-        }
-        flush();
-    }
-};
-
 // --------------------------------------------------------------------- app
 
 // Shuffle timer choices, in seconds; 0 = off.
@@ -577,6 +517,16 @@ struct App {
     ID2D1BitmapRenderTarget* offscreen = nullptr;
     ID2D1SolidColorBrush* offBrush = nullptr;
     UINT offW = 0, offH = 0;
+    // UI overlay rendered with D2D into a WIC bitmap, then composited as a GL
+    // texture over the projectM/shader engines so the UI is identical (crisp
+    // DirectWrite) in every engine, not an aliased GL bitmap font.
+    IWICImagingFactory* wic = nullptr;
+    IWICBitmap* olBmp = nullptr;
+    ID2D1RenderTarget* olRT = nullptr;
+    ID2D1SolidColorBrush* olBrush = nullptr;
+    UINT olW = 0, olH = 0;
+    std::vector<BYTE> olPixels;   // last rendered BGRA, uploaded on change
+    std::wstring olSig;           // signature of what's drawn (dirty check)
     std::vector<CustomPalette> customPalettes;
     int modeIdx = 0;
     int paletteIdx = 0;
@@ -616,7 +566,69 @@ struct App {
             deckFont->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             deckFont->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         }
+        CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                         IID_PPV_ARGS(&wic));
         return CreateTarget();
+    }
+
+    void ReleaseOverlay() {
+        SafeRelease(&olBrush);
+        SafeRelease(&olRT);
+        SafeRelease(&olBmp);
+        olW = olH = 0;
+        olSig.clear();
+    }
+
+    // (Re)create the WIC bitmap + D2D render target the UI overlay is drawn
+    // into. Capped at 1440 tall to bound the per-change texture upload; the
+    // aspect is preserved so deck hit-testing (in window pixels) stays aligned.
+    bool EnsureOverlayRT(int clientW, int clientH) {
+        if (!wic) return false;
+        UINT w, h;
+        if (clientH <= 1440) { w = (UINT)(clientW > 0 ? clientW : 1); h = (UINT)(clientH > 0 ? clientH : 1); }
+        else {
+            h = 1440;
+            w = (UINT)((float)h * (float)clientW / (float)clientH + 0.5f);
+            if (w < 1) w = 1;
+        }
+        if (olRT && olW == w && olH == h) return true;
+        ReleaseOverlay();
+        if (FAILED(wic->CreateBitmap(w, h, GUID_WICPixelFormat32bppPBGRA,
+                                     WICBitmapCacheOnLoad, &olBmp))) return false;
+        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+        if (FAILED(d2d->CreateWicBitmapRenderTarget(olBmp, props, &olRT))) { ReleaseOverlay(); return false; }
+        olRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &olBrush);
+        olW = w; olH = h;
+        return true;
+    }
+
+    // Render the UI overlay with D2D when it changed; copy the pixels out for
+    // the GL side. Returns true if the texture must be re-uploaded.
+    bool BuildOverlay(int clientW, int clientH, const wchar_t* l1, const wchar_t* l2) {
+        if (!EnsureOverlayRT(clientW, clientH)) return false;
+        wchar_t sig[900];
+        swprintf_s(sig, L"%u|%u|%d|%d|%d|%s|%s", olW, olH, deckVisible ? 1 : 0,
+                   deckHover, help ? 1 : 0, l1 ? l1 : L"", l2 ? l2 : L"");
+        if (olSig == sig) return false; // unchanged — reuse the cached texture
+        olSig = sig;
+
+        olRT->BeginDraw();
+        olRT->Clear(D2D1::ColorF(0, 0.0f));   // transparent
+        D2DPainter p(olRT, olBrush, hudFont, deckFont);
+        DrawUI(p, l1, l2);
+        olRT->EndDraw();
+
+        WICRect rc = { 0, 0, (INT)olW, (INT)olH };
+        IWICBitmapLock* lock = nullptr;
+        if (SUCCEEDED(olBmp->Lock(&rc, WICBitmapLockRead, &lock))) {
+            UINT cb = 0; BYTE* data = nullptr;
+            lock->GetDataPointer(&cb, &data);
+            olPixels.assign(data, data + cb);
+            lock->Release();
+        }
+        return true;
     }
 
     void ReleaseOffscreen() {
@@ -685,17 +697,20 @@ struct App {
         if (deckVisible && now - deckActivity > 2.5f) { deckVisible = false; deckHover = -1; }
         static const wchar_t* SHUF[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
 
-        // projectM engine: render OpenGL on the child window, then the shared
-        // UI (HUD + deck + help) over it with the GL painter.
+        RECT crc; GetClientRect(hwnd, &crc);
+
+        // projectM engine: render OpenGL on the child window, then composite
+        // the D2D-rendered UI overlay (crisp, identical to the built-in view)
+        // as a texture on top.
         if (pmActive && pmHost.ready) {
             wchar_t l1[300], l2[280];
             swprintf_s(l1, L"SPECTRAVIZ  projectM  %s  (%d presets)  SRC %s  SHUF %s  FPS %d",
                        pmHost.PresetName(), pmHost.PresetCount(), tap.SourceName(), SHUF[shuffleIdx], fps);
             swprintf_s(l2, L"SPACE/\x2190\x2192 preset  L folder  1-4 src  S shuffle  M exit  G gpu  B spotify  F full  H hud  F1 help  ESC");
+            bool dirty = BuildOverlay(crc.right, crc.bottom, l1, l2);
             pmHost.RenderEngine(frame);
             pmHost.BeginOverlay();
-            GLPainter gp((float)pmHost.cw, (float)pmHost.ch, pmHost.fontBase);
-            DrawUI(gp, l1, l2);
+            pmHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
             pmHost.Present();
             fpsFrames++;
             if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
@@ -709,10 +724,10 @@ struct App {
                        shaderHost.ShaderName(shaderIdx), (shaderIdx % shaderHost.ShaderCount()) + 1,
                        shaderHost.ShaderCount(), tap.SourceName(), SHUF[shuffleIdx], fps);
             swprintf_s(l2, L"SPACE/\x2190\x2192 shader  1-4 src  S shuffle  G exit  M milk  B spotify  F full  H hud  F1 help  ESC");
+            bool dirty = BuildOverlay(crc.right, crc.bottom, l1, l2);
             shaderHost.RenderEngine(shaderIdx, frame);
             shaderHost.BeginOverlay();
-            GLPainter gp((float)shaderHost.cw, (float)shaderHost.ch, shaderHost.fontBase);
-            DrawUI(gp, l1, l2);
+            shaderHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
             shaderHost.Present();
             fpsFrames++;
             if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
@@ -745,10 +760,9 @@ struct App {
         }
 
         wchar_t l1[300], l2[280];
-        static const wchar_t* shuf[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
-        swprintf_s(l1, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f",
+        swprintf_s(l1, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d",
                    modeIdx + 1, MODE_COUNT, mode.name, PaletteName(), tap.SourceName(),
-                   RES_OPTS[resIdx].name, offW, offH, shuf[shuffleIdx], calm ? L"  CALM" : L"", fps, frame.level);
+                   RES_OPTS[resIdx].name, offW, offH, SHUF[shuffleIdx], calm ? L"  CALM" : L"", fps);
         swprintf_s(l2, L"SPACE/\x2190\x2192 cycle  P palette  N new  1-4 src  R res  S shuffle  C calm  M milk  G gpu  B spotify  F full  H hud  F1 help  ESC");
         D2DPainter dp(rt, brush, hudFont, deckFont);
         DrawUI(dp, l1, l2);
@@ -1144,6 +1158,8 @@ struct App {
         pmHost.Destroy();
         tap.Stop();
         ReleaseOffscreen();
+        ReleaseOverlay();
+        SafeRelease(&wic);
         SafeRelease(&brush);
         SafeRelease(&rt);
         SafeRelease(&deckFont);

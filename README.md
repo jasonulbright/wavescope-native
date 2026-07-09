@@ -145,11 +145,16 @@ feature:
    (SYS/MIC/DEMO/FILE), engine (MODES/MILK/GPU), prev/next, palette,
    resolution, shuffle, calm, HUD, and Spotify — active selections
    highlighted. **The HUD, deck, and help render identically over every
-   engine** through one shared painter (`src/ui_paint.inl`): Direct2D for the
-   built-in modes, legacy GL for the projectM/shader engines, with mouse input
-   forwarded from the GL child windows so the deck is clickable there too — no
-   more "the controls vanish in MilkDrop". Still to do (optional): the
-   palette-shuffle include list + a full color-stop palette editor.
+   engine.** The UI is drawn once with Direct2D (`src/ui_paint.inl`); the
+   built-in modes draw it straight onto their D2D target, while the
+   projectM/shader engines render that same UI into a WIC bitmap and composite
+   it as a GL texture over the frame — so the controls are crisp DirectWrite
+   everywhere, never an aliased GL font, and never vanish when you switch
+   engines. Mouse input is forwarded from the GL child windows so the deck is
+   clickable there too. The overlay only re-renders/re-uploads when it changes
+   (dirty-checked), so it's cheap even at high resolution. Still to do
+   (optional): the palette-shuffle include list + a full color-stop palette
+   editor.
 8. ~~**Spotify.**~~ DONE (`src/spotify.inl`). `B` (or the `SPOT` deck button)
    runs OAuth2 Authorization Code + **PKCE** — no client secret, so nothing
    sensitive ships in the exe. The browser authorizes once; the redirect to
