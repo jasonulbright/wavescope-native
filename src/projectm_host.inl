@@ -7,9 +7,13 @@
 // projectM-4.dll ships next to the exe). Everything else stays OS-only.
 
 #include <projectM-4/projectM.h>
+#include <shlobj.h>
+#include <string>
+#include <vector>
 
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "shell32.lib")
 
 // WGL context-creation extension (avoid needing wglext.h).
 typedef HGLRC(WINAPI* PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC, HGLRC, const int*);
@@ -29,18 +33,21 @@ static void* ProjectMGlLoad(const char* name, void*) {
     return p;
 }
 
-// Bundled starter presets (raw .milk), resolved relative to the exe.
-static const wchar_t* PM_PRESETS[] = {
-    L"presets\\wavescope-tunnel.milk",
-    L"presets\\wavescope-bloom.milk",
-};
-static const int PM_PRESET_COUNT = (int)(sizeof(PM_PRESETS) / sizeof(PM_PRESETS[0]));
+// Directory holding raw .milk presets, resolved next to the exe. The user can
+// repoint this at their own preset archive (folder picker).
+static std::wstring PmExeDir() {
+    wchar_t path[MAX_PATH]; GetModuleFileNameW(nullptr, path, MAX_PATH);
+    wchar_t* slash = wcsrchr(path, L'\\'); if (slash) slash[1] = 0;
+    return std::wstring(path);
+}
 
 struct ProjectMHost {
     HWND child = nullptr;
     HDC dc = nullptr;
     HGLRC glrc = nullptr;
     projectm_handle pm = nullptr;
+    std::vector<std::wstring> presetPaths;
+    std::wstring curName = L"(none)";
     int presetIdx = 0;
     bool ready = false;
 
@@ -107,25 +114,41 @@ struct ProjectMHost {
         projectm_set_fps(pm, 60);
         projectm_set_preset_duration(pm, 30.0);
         projectm_set_soft_cut_duration(pm, 2.7);
+        ScanPresets(PmExeDir() + L"presets");
         LoadPreset(0, false);
         ready = true;
         return true;
     }
 
-    // Load a bundled preset by index from its raw .milk text.
+    // Collect every .milk file in a folder into the playable list.
+    void ScanPresets(const std::wstring& folder) {
+        presetPaths.clear();
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW((folder + L"\\*.milk").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                    presetPaths.push_back(folder + L"\\" + fd.cFileName);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+
+    // Load a preset by index from its raw .milk text.
     void LoadPreset(int idx, bool smooth) {
-        if (!pm) return;
-        presetIdx = ((idx % PM_PRESET_COUNT) + PM_PRESET_COUNT) % PM_PRESET_COUNT;
-        wchar_t path[MAX_PATH]; GetModuleFileNameW(nullptr, path, MAX_PATH);
-        wchar_t* slash = wcsrchr(path, L'\\'); if (slash) slash[1] = 0;
-        wcsncat_s(path, MAX_PATH, PM_PRESETS[presetIdx], _TRUNCATE);
-        FILE* fp = _wfopen(path, L"rb");
+        if (!pm || presetPaths.empty()) return;
+        int n = (int)presetPaths.size();
+        presetIdx = ((idx % n) + n) % n;
+        const std::wstring& path = presetPaths[presetIdx];
+        const wchar_t* base = wcsrchr(path.c_str(), L'\\');
+        curName = base ? base + 1 : path;
+        FILE* fp = _wfopen(path.c_str(), L"rb");
         if (!fp) return;
-        fseek(fp, 0, SEEK_END); long n = ftell(fp); fseek(fp, 0, SEEK_SET);
-        if (n > 0 && n < 1 << 20) {
-            char* buf = (char*)malloc(n + 1);
+        fseek(fp, 0, SEEK_END); long len = ftell(fp); fseek(fp, 0, SEEK_SET);
+        if (len > 0 && len < 1 << 20) {
+            char* buf = (char*)malloc(len + 1);
             if (buf) {
-                size_t rd = fread(buf, 1, n, fp); buf[rd] = 0;
+                size_t rd = fread(buf, 1, len, fp); buf[rd] = 0;
                 projectm_load_preset_data(pm, buf, smooth);
                 free(buf);
             }
@@ -135,7 +158,14 @@ struct ProjectMHost {
 
     void NextPreset(int dir) { if (ready) LoadPreset(presetIdx + dir, true); }
 
-    const wchar_t* PresetName() const { return PM_PRESETS[presetIdx]; }
+    // Repoint at a folder of presets (the user's .milk archive).
+    void SetPresetFolder(const wchar_t* folder) {
+        ScanPresets(folder);
+        if (!presetPaths.empty()) LoadPreset(0, true);
+    }
+
+    const wchar_t* PresetName() const { return curName.c_str(); }
+    int PresetCount() const { return (int)presetPaths.size(); }
 
     void Show(bool on) {
         if (child) ShowWindow(child, on ? SW_SHOW : SW_HIDE);
