@@ -96,8 +96,8 @@ feature:
 | projectM preset library | done (scans a folder of .milk; L picks your archive) |
 | GPU shader modes (plasma/tunnel/fractal) | done (G: real GLSL fragment shaders on the GL context) |
 | Multi-monitor (per-display windows) | done (`wall` flag: independent visual per screen) |
-| On-screen control deck (auto-hiding) | done (mouse bottom-bar; built-in view) |
-| Shortcuts / help overlay | done (F1 / ? keymap card; built-in-mode view) |
+| On-screen control deck (auto-hiding) | done (mouse bottom-bar, all engines) |
+| Shortcuts / help overlay | done (F1 / ? keymap card, all engines) |
 | Landing / marketing page | N/A (desktop app) |
 | Reduced-motion fallback | N/A (desktop) |
 
@@ -139,15 +139,17 @@ feature:
    Without the flag it stays a single 1440×900 window as before. *Per-monitor
    config persistence is a later refinement — today the primary window's setup
    is what's saved.*
-7. **On-screen control deck.** *Help overlay + auto-hiding deck DONE.* `F1` /
-   `?` shows a centered keymap card. The mouse-driven bottom bar reveals when
-   the cursor nears the bottom edge and auto-hides when idle: clickable
-   buttons for source (SYS/MIC/DEMO/FILE), engine (MODES/MILK/GPU), prev/next,
-   palette, resolution, shuffle, calm, HUD — active selections highlighted.
-   It's a built-in-mode surface (the GL engines cover the D2D layer; keyboard
-   still drives them — extending the deck over them is a follow-up). Still to
-   do: the palette-shuffle include list + full color-stop palette editor,
-   which the deck will host.
+7. ~~**On-screen control deck.**~~ DONE. `F1` / `?` shows a centered keymap
+   card. The mouse-driven bottom bar reveals when the cursor nears the bottom
+   edge and auto-hides when idle: clickable buttons for source
+   (SYS/MIC/DEMO/FILE), engine (MODES/MILK/GPU), prev/next, palette,
+   resolution, shuffle, calm, HUD, and Spotify — active selections
+   highlighted. **The HUD, deck, and help render identically over every
+   engine** through one shared painter (`src/ui_paint.inl`): Direct2D for the
+   built-in modes, legacy GL for the projectM/shader engines, with mouse input
+   forwarded from the GL child windows so the deck is clickable there too — no
+   more "the controls vanish in MilkDrop". Still to do (optional): the
+   palette-shuffle include list + a full color-stop palette editor.
 8. ~~**Spotify.**~~ DONE (`src/spotify.inl`). `B` (or the `SPOT` deck button)
    runs OAuth2 Authorization Code + **PKCE** — no client secret, so nothing
    sensitive ships in the exe. The browser authorizes once; the redirect to

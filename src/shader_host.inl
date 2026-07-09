@@ -150,6 +150,14 @@ struct ShaderHost {
     PFN_glBindVertexArray2 p_BindVertexArray = nullptr;
 
     static LRESULT CALLBACK ChildProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+        // Forward mouse input to the parent so the shared control deck is
+        // clickable over the shader engine too.
+        switch (m) {
+        case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP:
+        case WM_RBUTTONUP: case WM_LBUTTONDBLCLK: {
+            HWND p = GetParent(h); if (p) PostMessageW(p, m, w, l); return 0;
+        }
+        }
         return DefWindowProc(h, m, w, l);
     }
 
@@ -294,33 +302,9 @@ struct ShaderHost {
         cw = w; ch = h;
     }
 
-    // Same legacy-GL bitmap HUD as the projectM host, so the overlay is
-    // identical across all three engines.
-    void DrawHud(const char* line1, const char* line2) {
-        if (!fontBase) return;
-        p_UseProgram(0);
-        p_BindVertexArray(0);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_CULL_FACE);
-        glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
-        glOrtho(0, cw, ch, 0, -1, 1);
-        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
-        glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-        glColor4f(0.043f, 0.051f, 0.047f, 0.55f);
-        glBegin(GL_QUADS);
-        glVertex2i(0, 0); glVertex2i(cw, 0); glVertex2i(cw, 44); glVertex2i(0, 44);
-        glEnd();
-        glDisable(GL_BLEND);
-        glColor3f(0.95f, 0.96f, 0.95f);
-        glListBase(fontBase);
-        if (line1) { glRasterPos2i(14, 18); glCallLists((GLsizei)strlen(line1), GL_UNSIGNED_BYTE, line1); }
-        if (line2) { glRasterPos2i(14, 36); glCallLists((GLsizei)strlen(line2), GL_UNSIGNED_BYTE, line2); }
-        glMatrixMode(GL_MODELVIEW); glPopMatrix();
-        glMatrixMode(GL_PROJECTION); glPopMatrix();
-        glMatrixMode(GL_MODELVIEW);
-    }
-
-    void RenderFrame(int idx, const AudioFrame& f, const char* hud1, const char* hud2) {
+    // Render the shader frame; leaves the context current with no swap so the
+    // shared UI can be drawn over it via BeginOverlay + a GLPainter.
+    void RenderEngine(int idx, const AudioFrame& f) {
         if (!ready) return;
         idx = (idx % SV_COUNT + SV_COUNT) % SV_COUNT;
         ShaderProg& s = progs[idx];
@@ -339,7 +323,24 @@ struct ShaderHost {
         p_Uniform1f(s.uTreble, f.treble);
         p_Uniform1f(s.uBeat, f.beat);
         glDrawArrays(GL_TRIANGLES, 0, 3);
-        if (hud1) DrawHud(hud1, hud2);
+    }
+
+    // Reset modern-GL state and set a top-left ortho for the UIPainter.
+    void BeginOverlay() {
+        p_UseProgram(0);
+        p_BindVertexArray(0);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_CULL_FACE);
+        glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
+        glOrtho(0, cw, ch, 0, -1, 1);
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+    }
+
+    void Present() {
+        glDisable(GL_BLEND);
+        glMatrixMode(GL_MODELVIEW); glPopMatrix();
+        glMatrixMode(GL_PROJECTION); glPopMatrix();
+        glMatrixMode(GL_MODELVIEW);
         SwapBuffers(dc);
     }
 
