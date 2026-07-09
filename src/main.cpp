@@ -5,11 +5,11 @@
 // Everything below links against OS DLLs only; /MT static CRT means the
 // shipped artifact is one .exe with zero runtime requirements.
 //
-// Keys: SPACE/RIGHT next mode, LEFT prev, P palette, F fullscreen, H HUD,
-// ESC quit.
+// Keys: SPACE/RIGHT next (mode or preset), LEFT prev, P palette,
+// M toggle MilkDrop (projectM) engine, F fullscreen, H HUD, ESC quit.
 //
-// All 34 WaveScope modes are ported (see viz_modes.inl) across six trace
-// palettes. Phase 2 (see README): MilkDrop via projectM (C++/OpenGL).
+// All 34 WaveScope modes are ported (viz_modes.inl) across six palettes, and
+// the real MilkDrop engine runs via projectM (projectm_host.inl).
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -304,6 +304,9 @@ static float BinLog(const AudioFrame& f, float pos) {
 // Palettes, the DrawCtx primitives, all 34 modes, and the MODES[] registry.
 #include "viz_modes.inl"
 
+// The projectM (MilkDrop) engine host: child GL window + libprojectM.
+#include "projectm_host.inl"
+
 // --------------------------------------------------------------------- app
 
 struct App {
@@ -314,6 +317,9 @@ struct App {
     IDWriteFactory* dwrite = nullptr;
     IDWriteTextFormat* hudFont = nullptr;
     AudioTap tap;
+    HINSTANCE inst = nullptr;
+    ProjectMHost pmHost;
+    bool pmActive = false;
     int modeIdx = 0;
     int paletteIdx = 0;
     bool hud = true;
@@ -364,6 +370,14 @@ struct App {
 
         AudioFrame frame;
         tap.Analyze(frame, now);
+
+        // projectM engine: render OpenGL on the child window instead of D2D.
+        if (pmActive && pmHost.ready) {
+            pmHost.RenderFrame(frame);
+            fpsFrames++;
+            if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
+            return;
+        }
 
         const Mode& mode = MODES[modeIdx];
 
@@ -416,6 +430,25 @@ struct App {
                          SWP_NOZORDER | SWP_NOOWNERZORDER);
         }
     }
+
+    // Switch between the built-in Direct2D modes and the projectM engine.
+    void ToggleProjectM() {
+        if (!pmActive) {
+            if (!pmHost.ready && !pmHost.Init(inst, hwnd)) {
+                SetWindowTextW(hwnd, L"SpectraViz  (projectM failed to start)");
+                return;
+            }
+            RECT rc; GetClientRect(hwnd, &rc);
+            pmHost.Resize(rc.right, rc.bottom);
+            pmHost.Show(true);
+            pmActive = true;
+            SetWindowTextW(hwnd, L"SpectraViz  projectM (M to exit, SPACE next preset)");
+        } else {
+            pmActive = false;
+            pmHost.Show(false);
+            SetWindowTextW(hwnd, L"SpectraViz");
+        }
+    }
 };
 
 static App g_app;
@@ -426,13 +459,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (g_app.rt) {
             g_app.rt->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
         }
+        if (g_app.pmHost.ready) g_app.pmHost.Resize(LOWORD(lp), HIWORD(lp));
         return 0;
     case WM_KEYDOWN:
         switch (wp) {
         case VK_SPACE:
-        case VK_RIGHT: g_app.modeIdx = (g_app.modeIdx + 1) % MODE_COUNT; break;
-        case VK_LEFT:  g_app.modeIdx = (g_app.modeIdx + MODE_COUNT - 1) % MODE_COUNT; break;
+        case VK_RIGHT:
+            if (g_app.pmActive) g_app.pmHost.NextPreset(1);
+            else g_app.modeIdx = (g_app.modeIdx + 1) % MODE_COUNT;
+            break;
+        case VK_LEFT:
+            if (g_app.pmActive) g_app.pmHost.NextPreset(-1);
+            else g_app.modeIdx = (g_app.modeIdx + MODE_COUNT - 1) % MODE_COUNT;
+            break;
         case 'P':      g_app.paletteIdx = (g_app.paletteIdx + 1) % PAL_COUNT; break;
+        case 'M':      g_app.ToggleProjectM(); break;
         case 'F':      g_app.ToggleFullscreen(); break;
         case 'H':      g_app.hud = !g_app.hud; break;
         case VK_ESCAPE: PostQuitMessage(0); break;
@@ -445,7 +486,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProc(hwnd, msg, wp, lp);
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
+    g_app.inst = hInstance;
     QueryPerformanceFrequency(&g_app.qpcFreq);
     QueryPerformanceCounter(&g_app.qpcStart);
 
@@ -466,6 +508,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
     ShowWindow(g_app.hwnd, nCmdShow);
 
+    // Launch straight into the MilkDrop engine with "milkdrop" on the command line.
+    if (pCmdLine && wcsstr(pCmdLine, L"milkdrop")) g_app.ToggleProjectM();
+
     // Render loop: D2D presents on vsync, so this paces itself at 60.
     MSG msg = {};
     for (;;) {
@@ -477,6 +522,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         g_app.Render();
     }
 done:
+    g_app.pmHost.Destroy();
     g_app.tap.Stop();
     SafeRelease(&g_app.brush);
     SafeRelease(&g_app.rt);
