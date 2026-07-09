@@ -39,6 +39,11 @@ Requires Visual Studio 2026 (any edition) for the compiler. Output:
   raw `.milk` presets. `SPACE`/arrows cycle presets while it is active.
   Bundled starters in `presets/`. Launch with `SpectraViz.exe milkdrop` to
   boot straight into it.
+- **GPU shader engine** (`G` key, `src/shader_host.inl`): three per-pixel
+  fragment shaders (plasma field, warp tunnel, fractal fold) ported 1:1 from
+  the web build's WebGPU modes to GLSL 330, compiled at runtime and drawn as
+  a fullscreen triangle on their own GL context, audio-uniform driven. No new
+  dependency — pure GPU + OS. `SPACE`/arrows cycle shaders.
 - HUD, fullscreen toggle, mode + palette cycling.
 
 The core app is one `/MT` static `.exe` (~258 KB) with zero runtime deps.
@@ -49,8 +54,9 @@ they need the VC runtime (present wherever VS or the VC redist is installed).
 Keys: `SPACE`/`RIGHT` next (mode or preset), `LEFT` prev, `P` palette,
 `N` new custom palette (color picker), `1`/`2`/`3` source (loopback/mic/demo),
 `4` open audio file, `S` shuffle timer, `C` calm mode, `R` resolution target,
-`L` MilkDrop preset folder, `M` MilkDrop engine, `F` fullscreen, `H` HUD,
-`ESC` quit. Settings and custom palettes persist to `spectraviz.ini`.
+`L` MilkDrop preset folder, `M` MilkDrop engine, `G` GPU shader engine,
+`F` fullscreen, `H` HUD, `ESC` quit. Settings and custom palettes persist to
+`spectraviz.ini`.
 
 projectM is built from `C:\projects\projectm` via `build-native.bat` there
 (MSVC/Ninja, shared DLL, installed to `install-native/`). `build.bat` links
@@ -79,7 +85,7 @@ feature:
 | Custom palette creation | done (N: pick 1-3 colors; full stop editor with deck) |
 | Settings / preset persistence | done (spectraviz.ini beside the exe) |
 | projectM preset library | done (scans a folder of .milk; L picks your archive) |
-| **GPU shader modes (plasma/tunnel/fractal)** | MISSING (CPU plasma exists) |
+| GPU shader modes (plasma/tunnel/fractal) | done (G: real GLSL fragment shaders on the GL context) |
 | **Multi-monitor (per-display windows)** | MISSING |
 | **On-screen control deck (auto-hiding)** | MISSING |
 | **Shortcuts / help overlay** | MISSING (static HUD only) |
@@ -107,9 +113,14 @@ feature:
    files and cycles all of them (SPACE/arrows/shuffle); `L` picks your own
    archive folder; preset name + count shown in the title bar. (Native has
    no "upload/persist" step — the folder on disk *is* the library.)
-5. **GPU shader modes.** Port the three WebGPU shaders (plasma field, warp
-   tunnel, fractal fold) to HLSL/D3D11 or GLSL on the existing GL context,
-   full-resolution per-pixel.
+5. ~~**GPU shader modes.**~~ DONE. `G` toggles a GPU shader engine
+   (`src/shader_host.inl`): the three WebGPU shaders (plasma field, warp
+   tunnel, fractal fold) ported 1:1 to GLSL 330 and compiled at runtime,
+   drawn as a fullscreen triangle over its own WGL/OpenGL 3.3 child window —
+   the same host pattern as projectM, so the bitmap-font HUD overlays it too.
+   True per-pixel at window resolution, audio-uniform driven. `SPACE`/arrows
+   cycle shaders, shuffle rotates them, `SpectraViz.exe shader` boots into it.
+   Pulls in **no** new dependency (pure GPU + OS, unlike projectM's DLL).
 6. **Multi-monitor.** One borderless window + render loop per display
    (`EnumDisplayMonitors`), independent engine/mode/palette/resolution per
    window (each captures loopback itself, so no cross-window streaming).

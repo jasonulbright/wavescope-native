@@ -472,6 +472,7 @@ static float BinLog(const AudioFrame& f, float pos) {
 
 // The projectM (MilkDrop) engine host: child GL window + libprojectM.
 #include "projectm_host.inl"
+#include "shader_host.inl"
 
 // --------------------------------------------------------------------- app
 
@@ -502,6 +503,9 @@ struct App {
     HINSTANCE inst = nullptr;
     ProjectMHost pmHost;
     bool pmActive = false;
+    ShaderHost shaderHost;
+    bool shaderActive = false;
+    int shaderIdx = 0;       // index into the GPU shader modes
     ID2D1BitmapRenderTarget* offscreen = nullptr;
     ID2D1SolidColorBrush* offBrush = nullptr;
     UINT offW = 0, offH = 0;
@@ -590,6 +594,7 @@ struct App {
         if (SHUFFLE_SECS[shuffleIdx] > 0 && now - lastShuffle >= (float)SHUFFLE_SECS[shuffleIdx]) {
             lastShuffle = now;
             if (pmActive) pmHost.NextPreset(1);
+            else if (shaderActive) shaderIdx = (shaderIdx + 1) % shaderHost.ShaderCount();
             else modeIdx = PickRandomMode();
         }
 
@@ -610,6 +615,24 @@ struct App {
                 _snprintf_s(l2, _TRUNCATE, "SPACE/arrows preset  L folder  1 sys  2 mic  3 demo  4 file  S shuffle  M exit  F full  H hud");
             }
             pmHost.RenderFrame(frame, hud ? l1 : nullptr, hud ? l2 : nullptr);
+            fpsFrames++;
+            if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
+            return;
+        }
+
+        // GPU shader engine: a fullscreen fragment shader on the child window.
+        if (shaderActive && shaderHost.ready) {
+            char l1[256] = {}, l2[256] = {};
+            if (hud) {
+                char name[64] = {}, src[32] = {};
+                WideCharToMultiByte(CP_ACP, 0, shaderHost.ShaderName(shaderIdx), -1, name, sizeof(name), nullptr, nullptr);
+                WideCharToMultiByte(CP_ACP, 0, tap.SourceName(), -1, src, sizeof(src), nullptr, nullptr);
+                static const char* shuf[] = { "off", "15s", "30s", "1m", "5m" };
+                _snprintf_s(l1, _TRUNCATE, "SPECTRAVIZ  GPU shader  %s  (%d/%d)  SRC %s  SHUF %s  FPS %d",
+                            name, (shaderIdx % shaderHost.ShaderCount()) + 1, shaderHost.ShaderCount(), src, shuf[shuffleIdx], fps);
+                _snprintf_s(l2, _TRUNCATE, "SPACE/arrows shader  1 sys  2 mic  3 demo  4 file  S shuffle  G exit  M milkdrop  F full  H hud");
+            }
+            shaderHost.RenderFrame(shaderIdx, frame, hud ? l1 : nullptr, hud ? l2 : nullptr);
             fpsFrames++;
             if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
             return;
@@ -643,7 +666,7 @@ struct App {
         if (hud && hudFont) {
             wchar_t text[360];
             static const wchar_t* shuf[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
-            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  N new-palette  1-4 source  R res  S shuffle  C calm  M milkdrop  F full  H hud  ESC",
+            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d  LEVEL %.2f\nSPACE/\x2190\x2192 cycle  P palette  N new-palette  1-4 source  R res  S shuffle  C calm  M milkdrop  G shader  F full  H hud  ESC",
                        modeIdx + 1, MODE_COUNT, mode.name, PaletteName(), tap.SourceName(),
                        RES_OPTS[resIdx].name, offW, offH, shuf[shuffleIdx], calm ? L"  CALM" : L"", fps, frame.level);
             brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.75f));
@@ -716,6 +739,7 @@ struct App {
     // Switch between the built-in Direct2D modes and the projectM engine.
     void ToggleProjectM() {
         if (!pmActive) {
+            if (shaderActive) { shaderActive = false; shaderHost.Show(false); }
             if (!pmHost.ready && !pmHost.Init(inst, hwnd)) {
                 SetWindowTextW(hwnd, L"SpectraViz  (projectM failed to start)");
                 return;
@@ -728,6 +752,26 @@ struct App {
         } else {
             pmActive = false;
             pmHost.Show(false);
+            SetWindowTextW(hwnd, L"SpectraViz");
+        }
+    }
+
+    // Switch between the built-in Direct2D modes and the GPU shader engine.
+    void ToggleShader() {
+        if (!shaderActive) {
+            if (pmActive) { pmActive = false; pmHost.Show(false); }
+            if (!shaderHost.ready && !shaderHost.Init(inst, hwnd)) {
+                SetWindowTextW(hwnd, L"SpectraViz  (GPU shaders failed to start)");
+                return;
+            }
+            RECT rc; GetClientRect(hwnd, &rc);
+            shaderHost.Resize(rc.right, rc.bottom);
+            shaderHost.Show(true);
+            shaderActive = true;
+            SetWindowTextW(hwnd, L"SpectraViz  GPU shader (G to exit, SPACE next shader)");
+        } else {
+            shaderActive = false;
+            shaderHost.Show(false);
             SetWindowTextW(hwnd, L"SpectraViz");
         }
     }
@@ -812,7 +856,7 @@ struct App {
             WritePrivateProfileStringW(L"settings", k, b, path.c_str());
         };
         wi(L"mode", modeIdx); wi(L"palette", paletteIdx); wi(L"resolution", resIdx);
-        wi(L"shuffle", shuffleIdx); wi(L"calm", calm ? 1 : 0);
+        wi(L"shuffle", shuffleIdx); wi(L"calm", calm ? 1 : 0); wi(L"shader", shaderIdx);
         wchar_t cnt[16]; _itow_s((int)customPalettes.size(), cnt, 10);
         WritePrivateProfileStringW(L"palettes", L"count", cnt, path.c_str());
         for (size_t i = 0; i < customPalettes.size(); i++) {
@@ -864,6 +908,7 @@ struct App {
         resIdx = Clampi(GetPrivateProfileIntW(L"settings", L"resolution", 0, path.c_str()), 0, RES_COUNT - 1);
         shuffleIdx = Clampi(GetPrivateProfileIntW(L"settings", L"shuffle", 0, path.c_str()), 0, SHUFFLE_COUNT - 1);
         calm = GetPrivateProfileIntW(L"settings", L"calm", 0, path.c_str()) != 0;
+        shaderIdx = Clampi(GetPrivateProfileIntW(L"settings", L"shader", 0, path.c_str()), 0, SV_COUNT - 1);
     }
 };
 
@@ -876,16 +921,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_app.rt->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
         }
         if (g_app.pmHost.ready) g_app.pmHost.Resize(LOWORD(lp), HIWORD(lp));
+        if (g_app.shaderHost.ready) g_app.shaderHost.Resize(LOWORD(lp), HIWORD(lp));
         return 0;
     case WM_KEYDOWN:
         switch (wp) {
         case VK_SPACE:
         case VK_RIGHT:
             if (g_app.pmActive) g_app.pmHost.NextPreset(1);
+            else if (g_app.shaderActive) g_app.shaderIdx = (g_app.shaderIdx + 1) % g_app.shaderHost.ShaderCount();
             else g_app.CycleMode(1);
             break;
         case VK_LEFT:
             if (g_app.pmActive) g_app.pmHost.NextPreset(-1);
+            else if (g_app.shaderActive) g_app.shaderIdx = (g_app.shaderIdx + g_app.shaderHost.ShaderCount() - 1) % g_app.shaderHost.ShaderCount();
             else g_app.CycleMode(-1);
             break;
         case 'P':      g_app.CyclePalette(); break;
@@ -899,6 +947,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'R':      g_app.resIdx = (g_app.resIdx + 1) % RES_COUNT; break;
         case 'L':      g_app.OpenPresetFolder(); break;
         case 'M':      g_app.ToggleProjectM(); break;
+        case 'G':      g_app.ToggleShader(); break;
         case 'F':      g_app.ToggleFullscreen(); break;
         case 'H':      g_app.hud = !g_app.hud; break;
         case VK_ESCAPE: PostQuitMessage(0); break;
@@ -936,10 +985,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
     ShowWindow(g_app.hwnd, nCmdShow);
 
     // Command-line: "demo" starts on the synthetic signal, "file=<path>"
-    // plays an audio file, "milkdrop" boots straight into the projectM engine.
+    // plays an audio file, "milkdrop" boots into projectM, "shader" boots into
+    // the GPU shader engine.
     if (pCmdLine && wcsstr(pCmdLine, L"demo")) g_app.tap.SetSource(AudioTap::SRC_DEMO);
     if (pCmdLine) { const wchar_t* p = wcsstr(pCmdLine, L"file="); if (p) g_app.tap.SetFile(p + 5); }
     if (pCmdLine && wcsstr(pCmdLine, L"milkdrop")) g_app.ToggleProjectM();
+    if (pCmdLine && wcsstr(pCmdLine, L"shader")) g_app.ToggleShader();
 
     // Render loop: D2D presents on vsync, so this paces itself at 60.
     MSG msg = {};
@@ -953,6 +1004,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
     }
 done:
     g_app.SaveConfig(); // remember the setup for next launch
+    g_app.shaderHost.Destroy();
     g_app.pmHost.Destroy();
     g_app.tap.Stop();
     g_app.ReleaseOffscreen();
