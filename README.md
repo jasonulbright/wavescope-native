@@ -75,7 +75,7 @@ feature:
 | Calm mode (photosensitivity) | done (key C) |
 | **Custom palette creation** | MISSING |
 | **Settings / preset persistence** | MISSING |
-| **projectM preset library + upload** | MISSING (2 bundled only) |
+| projectM preset library | done (scans a folder of .milk; L picks your archive) |
 | **GPU shader modes (plasma/tunnel/fractal)** | MISSING (CPU plasma exists) |
 | **Multi-monitor (per-display windows)** | MISSING |
 | **On-screen control deck (auto-hiding)** | MISSING |
@@ -97,9 +97,10 @@ feature:
 3. **Custom palettes + persistence.** Palette creation from color stops;
    persist palettes, custom presets, and settings (calm/shuffle/last mode)
    to a config file beside the exe.
-4. **projectM preset library.** Point projectM at a folder of raw `.milk`
-   files (the 15-year archive), playlist via `projectM-4-playlist`, browse +
-   cycle, preset name shown while the engine is active.
+4. ~~**projectM preset library.**~~ DONE. Scans a folder of raw `.milk`
+   files and cycles all of them (SPACE/arrows/shuffle); `L` picks your own
+   archive folder; preset name + count shown in the title bar. (Native has
+   no "upload/persist" step — the folder on disk *is* the library.)
 5. **GPU shader modes.** Port the three WebGPU shaders (plasma field, warp
    tunnel, fractal fold) to HLSL/D3D11 or GLSL on the existing GL context,
    full-resolution per-pixel.

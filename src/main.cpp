@@ -595,7 +595,13 @@ struct App {
         if (pmActive && pmHost.ready) {
             pmHost.RenderFrame(frame);
             fpsFrames++;
-            if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
+            if (now - fpsWindowStart >= 1.0f) {
+                fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now;
+                wchar_t title[256];
+                swprintf_s(title, L"SpectraViz  projectM  %s  (%d presets, %d fps)  M exit  SPACE next  L folder",
+                           pmHost.PresetName(), pmHost.PresetCount(), fps);
+                SetWindowTextW(hwnd, title);
+            }
             return;
         }
 
@@ -682,6 +688,21 @@ struct App {
         if (GetOpenFileNameW(&ofn)) tap.SetFile(file);
     }
 
+    // Point the projectM engine at a folder of .milk presets.
+    void OpenPresetFolder() {
+        if (!pmActive || !pmHost.ready) return;
+        BROWSEINFOW bi = {};
+        bi.hwndOwner = hwnd;
+        bi.lpszTitle = L"Choose a folder of .milk presets";
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+        LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+        if (pidl) {
+            wchar_t path[MAX_PATH];
+            if (SHGetPathFromIDListW(pidl, path)) pmHost.SetPresetFolder(path);
+            CoTaskMemFree(pidl);
+        }
+    }
+
     // Switch between the built-in Direct2D modes and the projectM engine.
     void ToggleProjectM() {
         if (!pmActive) {
@@ -755,6 +776,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'S':      g_app.CycleShuffle(); break;
         case 'C':      g_app.SetCalm(!g_app.calm); break;
         case 'R':      g_app.resIdx = (g_app.resIdx + 1) % RES_COUNT; break;
+        case 'L':      g_app.OpenPresetFolder(); break;
         case 'M':      g_app.ToggleProjectM(); break;
         case 'F':      g_app.ToggleFullscreen(); break;
         case 'H':      g_app.hud = !g_app.hud; break;
@@ -770,6 +792,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
     g_app.inst = hInstance;
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // UI-thread shell dialogs
     QueryPerformanceFrequency(&g_app.qpcFreq);
     QueryPerformanceCounter(&g_app.qpcStart);
 
