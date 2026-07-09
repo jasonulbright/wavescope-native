@@ -65,7 +65,7 @@ feature:
 | MilkDrop, raw `.milk` (projectM) | done (2 bundled presets so far) |
 | System-audio capture | done (WASAPI loopback) |
 | Fullscreen | done |
-| HUD / keyboard control | done (static HUD; deck UI pending) |
+| HUD / keyboard control | done (persists over both engines; deck UI pending) |
 | Demo signal source | done (key 3, or `SpectraViz demo`) |
 | Microphone source | done (key 2) |
 | Audio-file source | done (key 4, Media Foundation decode + play) |
