@@ -68,7 +68,7 @@ feature:
 | HUD / keyboard control | done (static HUD; deck UI pending) |
 | Demo signal source | done (key 3, or `SpectraViz demo`) |
 | Microphone source | done (key 2) |
-| **Audio-file source** | MISSING |
+| Audio-file source | done (key 4, Media Foundation decode + play) |
 | **Spotify (quick + PKCE)** | MISSING |
 | **Resolution targets (1080-8K)** | MISSING (renders at window size) |
 | **Shuffle timer (modes + palettes)** | MISSING |
@@ -85,8 +85,9 @@ feature:
 
 ## Roadmap (ordered for parity)
 
-1. **Audio input sources.** *(loopback, demo, mic done; keys 1/2/3.)*
-   Remaining: audio-file source (Media Foundation decode + render + analyze).
+1. ~~**Audio input sources.**~~ DONE. Loopback (1), mic (2), demo (3), and
+   audio file (4, Media Foundation decode + WASAPI render + analyze, loops;
+   also `SpectraViz.exe file=<path>`). All four switchable at runtime.
 2. **Playback controls.** Resolution targets (render-to-texture at
    1080/1440/2160/4320 then scale), shuffle timer for modes and palettes
    with an include list, calm mode (exclude the beat-burst modes + soften
@@ -109,6 +110,23 @@ feature:
 8. **Spotify.** WinHTTP PKCE with a localhost redirect for the connected
    one-button mode; capture stays via loopback.
 9. **Polish.** Tray icon, launch-at-login / kiosk flag, preset hot-reload.
+
+## Beyond parity (optional, not required for 1:1)
+
+- **Built-in mini-player.** Once the audio-file source exists (decode + play),
+  grow it into a small player: a queue, transport (play/pause/seek/prev/next),
+  drag-drop, now-playing metadata on screen. Decode via Media Foundation
+  (zero new deps; covers MP3/AAC/WAV/FLAC on Win10+); reach for the
+  single-header **miniaudio** (MIT-0) only if MF's format coverage or
+  ergonomics get annoying. Deliberately NOT a foobar2000-class library
+  manager (that's a different product; the loopback source already lets any
+  external player feed the visuals). foobar2000 itself is closed source, so
+  it can't be embedded.
+- **No built-in playback EQ.** Point EQ-wanting users at Equalizer APO
+  (open source, system-wide) + the loopback source, which visualizes the
+  post-EQ output for free. A *visual-only* band-tilt knob (weights the
+  analysis bands without touching the audio) is the only EQ-ish thing worth
+  considering here.
 
 ## Source map
 

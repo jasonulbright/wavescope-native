@@ -18,6 +18,11 @@
 #include <dwrite.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <commdlg.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
+#include <mferror.h>
 
 #include <atomic>
 #include <cmath>
@@ -31,6 +36,10 @@
 #pragma comment(lib, "d2d1.lib")
 #pragma comment(lib, "dwrite.lib")
 #pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfreadwrite.lib")
+#pragma comment(lib, "mfuuid.lib")
 
 // ---------------------------------------------------------------- utilities
 
@@ -98,15 +107,23 @@ public:
 
     UINT32 SampleRate() const { return m_sampleRate; }
 
-    enum { SRC_LOOPBACK = 0, SRC_MIC = 1, SRC_DEMO = 2 };
+    enum { SRC_LOOPBACK = 0, SRC_MIC = 1, SRC_DEMO = 2, SRC_FILE = 3 };
     void SetSource(int s) { m_source = s; }
     int Source() const { return m_source.load(); }
     const wchar_t* SourceName() const {
         switch (m_source.load()) {
         case SRC_MIC:  return L"MICROPHONE";
         case SRC_DEMO: return L"DEMO";
+        case SRC_FILE: return L"AUDIO FILE";
         default:       return L"SYSTEM AUDIO";
         }
+    }
+    // Play + analyze a decoded audio file (Media Foundation).
+    void SetFile(const wchar_t* path) {
+        AcquireSRWLockExclusive(&m_lock);
+        wcsncpy_s(m_filePath, path, _TRUNCATE);
+        ReleaseSRWLockExclusive(&m_lock);
+        m_source = SRC_FILE;
     }
 
     // Snapshot the newest 2048 samples and analyze them.
@@ -212,9 +229,11 @@ private:
     // when the source changes. Demo needs no capture (Analyze synthesizes).
     DWORD Run() {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        MFStartup(MF_VERSION, MFSTARTUP_LITE);
         while (!m_quit) {
             int src = m_source.load();
             if (src == SRC_DEMO) { Sleep(30); continue; }
+            if (src == SRC_FILE) { RunFile(); continue; }
 
             IMMDeviceEnumerator* devEnum = nullptr;
             IMMDevice* device = nullptr;
@@ -280,8 +299,118 @@ private:
             SafeRelease(&devEnum);
             if (FAILED(hr)) Sleep(200); // failed to open: pause before retry
         }
+        MFShutdown();
         CoUninitialize();
         return 0;
+    }
+
+    // Decode a file with Media Foundation, render it to the default output,
+    // and feed the same samples (mono) into the analysis ring in sync. Loops
+    // the file. Runs until the source changes or the app quits.
+    void RunFile() {
+        wchar_t path[MAX_PATH];
+        AcquireSRWLockShared(&m_lock);
+        wcsncpy_s(path, m_filePath, _TRUNCATE);
+        ReleaseSRWLockShared(&m_lock);
+        if (!path[0]) { Sleep(50); m_source = SRC_LOOPBACK; return; }
+
+        const UINT32 RATE = 48000, CH = 2;
+        WAVEFORMATEX wf = {};
+        wf.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+        wf.nChannels = (WORD)CH; wf.nSamplesPerSec = RATE; wf.wBitsPerSample = 32;
+        wf.nBlockAlign = (WORD)(CH * 4); wf.nAvgBytesPerSec = RATE * CH * 4;
+
+        // Media Foundation source reader -> float PCM at our format.
+        IMFSourceReader* reader = nullptr;
+        if (FAILED(MFCreateSourceReaderFromURL(path, nullptr, &reader)) || !reader) {
+            m_source = SRC_LOOPBACK; return;
+        }
+        reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
+        reader->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
+        IMFMediaType* outType = nullptr; MFCreateMediaType(&outType);
+        outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+        outType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
+        outType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, CH);
+        outType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, RATE);
+        outType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 32);
+        outType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, CH * 4);
+        outType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, RATE * CH * 4);
+        HRESULT hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, outType);
+        outType->Release();
+        if (FAILED(hr)) { reader->Release(); m_source = SRC_LOOPBACK; return; }
+
+        // WASAPI render on the default output; the engine converts our format.
+        IMMDeviceEnumerator* devEnum = nullptr; IMMDevice* device = nullptr;
+        IAudioClient* client = nullptr; IAudioRenderClient* render = nullptr;
+        UINT32 bufFrames = 0;
+        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                              __uuidof(IMMDeviceEnumerator), (void**)&devEnum);
+        if (SUCCEEDED(hr)) hr = devEnum->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        if (SUCCEEDED(hr)) hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&client);
+        if (SUCCEEDED(hr)) hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
+            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+            1000000, 0, &wf, nullptr);
+        if (SUCCEEDED(hr)) hr = client->GetBufferSize(&bufFrames);
+        if (SUCCEEDED(hr)) hr = client->GetService(__uuidof(IAudioRenderClient), (void**)&render);
+        if (SUCCEEDED(hr)) hr = client->Start();
+
+        if (SUCCEEDED(hr)) {
+            m_sampleRate = RATE;
+            std::vector<float> pending; size_t pos = 0; // interleaved stereo
+            while (!m_quit && m_source.load() == SRC_FILE) {
+                if ((pending.size() - pos) < (size_t)bufFrames * 2 * 4) {
+                    DWORD flags = 0; IMFSample* sample = nullptr;
+                    if (SUCCEEDED(reader->ReadSample(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0,
+                                                     nullptr, &flags, nullptr, &sample))) {
+                        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
+                            PROPVARIANT var; PropVariantInit(&var);
+                            var.vt = VT_I8; var.hVal.QuadPart = 0;
+                            reader->SetCurrentPosition(GUID_NULL, var);
+                            PropVariantClear(&var);
+                        } else if (sample) {
+                            IMFMediaBuffer* buf = nullptr;
+                            if (SUCCEEDED(sample->ConvertToContiguousBuffer(&buf)) && buf) {
+                                BYTE* data = nullptr; DWORD len = 0;
+                                if (SUCCEEDED(buf->Lock(&data, nullptr, &len))) {
+                                    const float* fp = (const float*)data;
+                                    pending.insert(pending.end(), fp, fp + len / 4);
+                                    buf->Unlock();
+                                }
+                                buf->Release();
+                            }
+                        }
+                        if (sample) sample->Release();
+                    }
+                }
+                UINT32 pad = 0;
+                if (SUCCEEDED(client->GetCurrentPadding(&pad))) {
+                    UINT32 avail = bufFrames - pad;
+                    size_t haveFrames = (pending.size() - pos) / 2;
+                    UINT32 toWrite = (UINT32)(haveFrames < avail ? haveFrames : avail);
+                    if (toWrite > 0) {
+                        BYTE* out = nullptr;
+                        if (SUCCEEDED(render->GetBuffer(toWrite, &out))) {
+                            memcpy(out, pending.data() + pos, (size_t)toWrite * 2 * sizeof(float));
+                            AcquireSRWLockExclusive(&m_lock);
+                            for (UINT32 i = 0; i < toWrite; i++)
+                                m_ring[(m_writeIdx++) % RING] =
+                                    (pending[pos + i * 2] + pending[pos + i * 2 + 1]) * 0.5f;
+                            ReleaseSRWLockExclusive(&m_lock);
+                            render->ReleaseBuffer(toWrite, 0);
+                            pos += (size_t)toWrite * 2;
+                        }
+                    }
+                }
+                if (pos > (1 << 18)) { pending.erase(pending.begin(), pending.begin() + pos); pos = 0; }
+                Sleep(3);
+            }
+            client->Stop();
+        }
+        SafeRelease(&render);
+        SafeRelease(&client);
+        SafeRelease(&device);
+        SafeRelease(&devEnum);
+        reader->Release();
     }
 
     // Iterative radix-2 Cooley-Tukey, N=2048.
@@ -323,6 +452,7 @@ private:
     UINT32 m_sampleRate = 48000;
     float m_smooth[1024] = {};
     float m_level = 0, m_bassAvg = 0, m_beat = 0, m_lastT = 0;
+    wchar_t m_filePath[MAX_PATH] = {};
 };
 
 // ------------------------------------------------------------------- modes
@@ -427,7 +557,7 @@ struct App {
 
         if (hud && hudFont) {
             wchar_t text[320];
-            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  FPS %d  LEVEL %.2f\nSPACE next  \x2190 prev  P palette  1 system  2 mic  3 demo  M milkdrop  F full  H hud  ESC quit",
+            swprintf_s(text, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  FPS %d  LEVEL %.2f\nSPACE next  \x2190 prev  P palette  1 system  2 mic  3 demo  4 file  M milkdrop  F full  H hud  ESC quit",
                        modeIdx + 1, MODE_COUNT, mode.name, PALETTES[paletteIdx].name, tap.SourceName(), fps, frame.level);
             brush->SetColor(D2D1::ColorF(0.95f, 0.96f, 0.95f, 0.75f));
             rt->DrawTextW(text, (UINT32)wcslen(text), hudFont,
@@ -465,6 +595,20 @@ struct App {
                          SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
                          SWP_NOZORDER | SWP_NOOWNERZORDER);
         }
+    }
+
+    // Pick an audio file to play + visualize.
+    void OpenFile() {
+        wchar_t file[MAX_PATH] = {};
+        OPENFILENAMEW ofn = {};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = hwnd;
+        ofn.lpstrFilter =
+            L"Audio files\0*.mp3;*.wav;*.flac;*.m4a;*.aac;*.wma;*.ogg\0All files\0*.*\0";
+        ofn.lpstrFile = file;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
+        if (GetOpenFileNameW(&ofn)) tap.SetFile(file);
     }
 
     // Switch between the built-in Direct2D modes and the projectM engine.
@@ -512,6 +656,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case '1':      g_app.tap.SetSource(AudioTap::SRC_LOOPBACK); break;
         case '2':      g_app.tap.SetSource(AudioTap::SRC_MIC); break;
         case '3':      g_app.tap.SetSource(AudioTap::SRC_DEMO); break;
+        case '4':      g_app.OpenFile(); break;
         case 'M':      g_app.ToggleProjectM(); break;
         case 'F':      g_app.ToggleFullscreen(); break;
         case 'H':      g_app.hud = !g_app.hud; break;
@@ -547,9 +692,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
 
     ShowWindow(g_app.hwnd, nCmdShow);
 
-    // Command-line: "demo" starts on the synthetic signal, "milkdrop" boots
-    // straight into the projectM engine.
+    // Command-line: "demo" starts on the synthetic signal, "file=<path>"
+    // plays an audio file, "milkdrop" boots straight into the projectM engine.
     if (pCmdLine && wcsstr(pCmdLine, L"demo")) g_app.tap.SetSource(AudioTap::SRC_DEMO);
+    if (pCmdLine) { const wchar_t* p = wcsstr(pCmdLine, L"file="); if (p) g_app.tap.SetFile(p + 5); }
     if (pCmdLine && wcsstr(pCmdLine, L"milkdrop")) g_app.ToggleProjectM();
 
     // Render loop: D2D presents on vsync, so this paces itself at 60.
