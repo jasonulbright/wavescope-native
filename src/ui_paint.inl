@@ -45,22 +45,21 @@ struct D2DPainter : UIPainter {
     float W() override { return rt->GetSize().width / scale; }
     float H() override { return rt->GetSize().height / scale; }
 
+    // The signal-laboratory design language is square-cornered everywhere
+    // (web styles.css: hairline borders, no radius) — the `round` hint is
+    // accepted for source stability but always draws square.
     void Rect(float x, float y, float w, float h,
-              float r, float g, float b, float a, bool round) override {
+              float r, float g, float b, float a, bool /*round*/) override {
         br->SetColor(D2D1::ColorF(r, g, b, a));
-        D2D1_RECT_F rc = D2D1::RectF(x, y, x + w, y + h);
-        if (round) { D2D1_ROUNDED_RECT rr = { rc, 5, 5 }; rt->FillRoundedRectangle(rr, br); }
-        else rt->FillRectangle(rc, br);
+        rt->FillRectangle(D2D1::RectF(x, y, x + w, y + h), br);
     }
 
     void Stroke(float x, float y, float w, float h,
-                float r, float g, float b, float a, float thickness, bool round) override {
+                float r, float g, float b, float a, float thickness, bool /*round*/) override {
         br->SetColor(D2D1::ColorF(r, g, b, a));
         // Inset by half the stroke so the outline sits fully inside the button box.
         float o = thickness * 0.5f;
-        D2D1_RECT_F rc = D2D1::RectF(x + o, y + o, x + w - o, y + h - o);
-        if (round) { D2D1_ROUNDED_RECT rr = { rc, 5, 5 }; rt->DrawRoundedRectangle(rr, br, thickness); }
-        else rt->DrawRectangle(rc, br, thickness);
+        rt->DrawRectangle(D2D1::RectF(x + o, y + o, x + w - o, y + h - o), br, thickness);
     }
 
     void Text(float x, float y, float w, float h, const wchar_t* s,

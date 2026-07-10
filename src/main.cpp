@@ -488,6 +488,12 @@ static const int RES_COUNT = (int)(sizeof(RES_OPTS) / sizeof(RES_OPTS[0]));
 // A user-created palette: 1-3 RGB stops (0..1), persisted to the config file.
 struct CustomPalette { std::wstring name; int n = 1; float stops[3][3] = {}; };
 
+// Web console design tokens (app/src/styles.css @theme) — the deck, menus,
+// panel and HUD chrome must match the web app exactly.
+static const float UI_ULTRA_R = 0.200f, UI_ULTRA_G = 0.275f, UI_ULTRA_B = 0.788f; // #3346C9
+static const float UI_SOFT_R  = 0.420f, UI_SOFT_G  = 0.478f, UI_SOFT_B  = 0.871f; // #6B7ADE
+static const float UI_SCOPE_R = 0.043f, UI_SCOPE_G = 0.051f, UI_SCOPE_B = 0.047f; // #0B0D0C
+
 static int Clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 // Appends each display's bounding rect (defined after App, used by DisplayRects).
@@ -596,12 +602,14 @@ struct App {
         if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &d2d))) return false;
         if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
                                        (IUnknown**)&dwrite))) return false;
+        // Sizes mirror the web console: 12px meter text for HUD + buttons,
+        // 10px tracked-uppercase readout labels for the group descriptors.
         dwrite->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                 14.0f, L"en-us", &hudFont);
+                                 12.0f, L"en-us", &hudFont);
         dwrite->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                 11.0f, L"en-us", &deckFont);
+                                 12.0f, L"en-us", &deckFont);
         if (deckFont) {
             deckFont->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             deckFont->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -611,7 +619,7 @@ struct App {
         // right-aligned so they tuck against the group they label.
         dwrite->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                 9.0f, L"en-us", &tinyFont);
+                                 10.0f, L"en-us", &tinyFont);
         if (tinyFont) {
             tinyFont->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
             tinyFont->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -1132,8 +1140,11 @@ struct App {
     // (monospace content) width; gaps are small and uniform — the tiny group
     // descriptors do the visual grouping, not fat gaps.
     D2D1_RECT_F DeckLayout(float W, float H, D2D1_RECT_F out[DK_N]) {
-        const float margin = 22, rowH = 28, gap = 7, groupGap = 12, rowGap = 8, bottom = 16;
-        const float charW = 6.1f, padX = 12, minBtn = 20;
+        // Web deck metrics: 6px gaps inside a group, 20px between groups,
+        // 12px between rows, 24px side margins, 12px bar padding, ~10px
+        // button side padding at 12px monospace.
+        const float margin = 24, rowH = 28, gap = 6, groupGap = 20, rowGap = 12, bottom = 12;
+        const float charW = 6.6f, padX = 20, minBtn = 24;
         float x0 = margin, x1 = W - margin, avail = x1 - x0;
 
         // Hidden buttons (engine-dependent, web parity) take no space at all;
@@ -1208,7 +1219,9 @@ struct App {
             out[i] = D2D1::RectF(bx, y, bx + nat[i], y + rowH);
             bx += nat[i] + gap;
         }
-        return D2D1::RectF(x0 - 8, yTop - 8, x1 + 8, H - bottom + 8);
+        // The full-width bar rect (web: bg-scope/85 with a white/10 top
+        // hairline, hugging the bottom edge).
+        return D2D1::RectF(0, yTop - bottom, W, H);
     }
 
     // Hit tests take LOGICAL coords (WndProc divides mouse pixels by UiScale).
@@ -1419,7 +1432,7 @@ struct App {
         int n = MenuCount(a);
         if (n <= 0 || DeckHidden(a)) { bg = D2D1::RectF(0, 0, 0, 0); return; }
         D2D1_RECT_F b[DK_N]; DeckLayout(W, H, b);
-        const float rw = 168, rh = 24, pad = 5, colGap = 4, topLimit = 8;
+        const float rw = 192, rh = 24, pad = 5, colGap = 4, topLimit = 8; // web select max-w-48
         float bottom = b[a].top - 8;
         int perCol = (int)((bottom - topLimit - 2 * pad) / rh);
         if (perCol < 1) perCol = 1;
@@ -1446,15 +1459,23 @@ struct App {
         D2D1_RECT_F bg; std::vector<D2D1_RECT_F> rows;
         MenuGeom(deckMenu, p.W(), p.H(), bg, rows);
         if (rows.empty()) return;
-        p.Rect(bg.left, bg.top, bg.right - bg.left, bg.bottom - bg.top, 0.04f, 0.05f, 0.06f, 0.98f, true);
+        // Dropdown card: scope ground with a white/15 hairline (web chrome).
+        p.Rect(bg.left, bg.top, bg.right - bg.left, bg.bottom - bg.top,
+               UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.97f);
+        p.Stroke(bg.left, bg.top, bg.right - bg.left, bg.bottom - bg.top, 1, 1, 1, 0.15f, 1.0f);
         int cur = MenuCurrent(deckMenu);
         for (int i = 0; i < (int)rows.size(); i++) {
             bool active = (i == cur), off = MenuDisabled(deckMenu, i);
-            p.Rect(rows[i].left, rows[i].top, rows[i].right - rows[i].left, rows[i].bottom - rows[i].top,
-                   active ? 0.20f : 0.10f, active ? 0.42f : 0.11f, active ? 0.72f : 0.12f, 0.95f, true);
-            float t = off ? 0.34f : (active ? 1.0f : 0.86f);
-            p.Text(rows[i].left + 10, rows[i].top, rows[i].right - rows[i].left - 14, rows[i].bottom - rows[i].top,
-                   MenuItem(deckMenu, i), t, active ? 1.0f : (off ? 0.36f : 0.88f), active ? 1.0f : (off ? 0.38f : 0.90f), 0.96f);
+            float rw2 = rows[i].right - rows[i].left, rh2 = rows[i].bottom - rows[i].top;
+            if (active) {
+                p.Rect(rows[i].left, rows[i].top, rw2, rh2, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 0.22f);
+                p.Stroke(rows[i].left, rows[i].top, rw2, rh2, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 0.9f, 1.0f);
+                p.Text(rows[i].left + 10, rows[i].top + 3, rw2 - 14, rh2 - 3,
+                       MenuItem(deckMenu, i), UI_SOFT_R, UI_SOFT_G, UI_SOFT_B, 1.0f);
+            } else {
+                p.Text(rows[i].left + 10, rows[i].top + 3, rw2 - 14, rh2 - 3,
+                       MenuItem(deckMenu, i), 1, 1, 1, off ? 0.35f : 0.80f);
+            }
         }
     }
     bool MenuClick(int mx, int my) {
@@ -1512,8 +1533,23 @@ struct App {
     void DrawUI(UIPainter& p, const wchar_t* l1, const wchar_t* /*l2*/) {
         float hf = HudFade();
         if (l1 && hf > 0.01f) {
-            // Compact top-left status stack (SRC / MODE / RES / FPS), like the web.
-            p.Text(16, 10, 460, 108, l1, 0.90f, 0.93f, 0.92f, 0.92f * hf);
+            // Top-left readout stack, one scope/70 chip per line with
+            // white/70 text — the web HUD's exact recipe.
+            std::wstring all = l1;
+            float y = 16;
+            size_t pos = 0;
+            while (pos <= all.size()) {
+                size_t nl = all.find(L'\n', pos);
+                std::wstring line = all.substr(pos, nl == std::wstring::npos ? nl : nl - pos);
+                if (!line.empty()) {
+                    float chipW = (float)line.length() * 6.6f + 16.0f;
+                    p.Rect(16, y, chipW, 20, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.70f * hf);
+                    p.Text(24, y + 3, chipW, 16, line.c_str(), 1, 1, 1, 0.70f * hf);
+                    y += 24;
+                }
+                if (nl == std::wstring::npos) break;
+                pos = nl + 1;
+            }
         }
         if (palPanel) { DrawPalettePanel(p); return; }  // modal: hides deck
         if (deckVisible) DrawDeckP(p);
@@ -1523,27 +1559,35 @@ struct App {
 
     void DrawDeckP(UIPainter& p) {
         D2D1_RECT_F b[DK_N];
-        DeckLayout(p.W(), p.H(), b);   // no full-width backdrop — let the bar breathe
+        D2D1_RECT_F bar = DeckLayout(p.W(), p.H(), b);
+        // Full-width bar, web-style: bg-scope/85 under a white/10 hairline.
+        p.Rect(bar.left, bar.top, bar.right - bar.left, bar.bottom - bar.top,
+               UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.85f);
+        p.Rect(bar.left, bar.top, bar.right - bar.left, 1.0f, 1, 1, 1, 0.10f);
         for (int i = 0; i < DK_N; i++) {
             if (DeckHidden(i)) continue;
             bool active = DeckActive(i), hover = (i == deckHover);
             float w = b[i].right - b[i].left, h = b[i].bottom - b[i].top;
-            // Each button carries only a faint dark fill for legibility + a thin
-            // outline. Active = subtle blue; hover = a touch brighter.
+            // Web button recipe: hairline border only (white/15, white/40 on
+            // hover), text white/60 -> white; active = ultra border, ultra/20
+            // fill, ultra-soft text. No fills otherwise, no rounding.
             if (active) {
-                p.Rect(b[i].left, b[i].top, w, h, 0.15f, 0.33f, 0.58f, 0.55f, true);
-                p.Stroke(b[i].left, b[i].top, w, h, 0.36f, 0.62f, 0.95f, 0.95f, 1.2f, true);
+                p.Rect(b[i].left, b[i].top, w, h, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 0.20f);
+                p.Stroke(b[i].left, b[i].top, w, h, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 1.0f, 1.0f);
             } else {
-                p.Rect(b[i].left, b[i].top, w, h, 0.05f, 0.06f, 0.07f, hover ? 0.55f : 0.40f, true);
-                p.Stroke(b[i].left, b[i].top, w, h, 0.36f, 0.42f, 0.49f, hover ? 0.80f : 0.45f, 1.0f, true);
+                p.Stroke(b[i].left, b[i].top, w, h, 1, 1, 1, hover ? 0.40f : 0.15f, 1.0f);
             }
-            float tr = active ? 1.0f : 0.78f, tg = active ? 1.0f : 0.83f, tb = active ? 1.0f : 0.85f;
-            p.Text(b[i].left, b[i].top, w, h, DeckLabel(i).c_str(), tr, tg, tb, active ? 1.0f : 0.92f, true);
-            // Tiny dim descriptor tucked into the reserved slot left of the group.
+            if (active)
+                p.Text(b[i].left, b[i].top, w, h, DeckLabel(i).c_str(),
+                       UI_SOFT_R, UI_SOFT_G, UI_SOFT_B, 1.0f, true);
+            else
+                p.Text(b[i].left, b[i].top, w, h, DeckLabel(i).c_str(),
+                       1, 1, 1, hover ? 1.0f : 0.60f, true);
+            // Tiny readout descriptor in the reserved slot (web: white/40).
             const wchar_t* d = DeckDescriptor(i);
             if (*d) {
                 float dw = DescWidth(i);
-                p.Text(b[i].left - dw, b[i].top, dw - 5, h, d, 0.50f, 0.56f, 0.58f, 0.75f, true, true);
+                p.Text(b[i].left - dw, b[i].top, dw - 6, h, d, 1, 1, 1, 0.40f, true, true);
             }
         }
     }
@@ -1577,8 +1621,9 @@ struct App {
         float w = 620, h = 505;
         float x = (p.W() - w) * 0.5f, y = (p.H() - h) * 0.5f;
         if (x < 0) x = 0; if (y < 0) y = 0;
-        p.Rect(x, y, w, h, 0.03f, 0.04f, 0.04f, 0.92f, true);
-        p.Text(x + 22, y + 18, w - 32, h - 24, HELP, 0.95f, 0.96f, 0.95f, 0.96f);
+        p.Rect(x, y, w, h, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.95f);
+        p.Stroke(x, y, w, h, 1, 1, 1, 0.15f, 1.0f);
+        p.Text(x + 22, y + 18, w - 32, h - 24, HELP, 1, 1, 1, 0.85f);
     }
 
     // T / tray menu: keep the visualizer over every other window (the
@@ -1874,8 +1919,9 @@ struct App {
     }
     void DrawCheck(UIPainter& p, const D2D1_RECT_F& b, bool on) {
         float w = b.right - b.left, h = b.bottom - b.top;
-        p.Rect(b.left, b.top, w, h, 0.16f, 0.18f, 0.21f, 0.95f);
-        if (on) p.Rect(b.left + 3, b.top + 3, w - 6, h - 6, 0.30f, 0.60f, 0.95f, 1.0f);
+        p.Rect(b.left, b.top, w, h, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.95f);
+        p.Stroke(b.left, b.top, w, h, 1, 1, 1, 0.25f, 1.0f);
+        if (on) p.Rect(b.left + 3, b.top + 3, w - 6, h - 6, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 1.0f);
     }
     void DrawGrad(UIPainter& p, float x, float y, float w, float h, D2D1_COLOR_F (*fn)(float, float)) {
         const int N = 48; float sw = w / (float)N;
@@ -1889,9 +1935,12 @@ struct App {
         PalRects r; PalLayout(p.W(), p.H(), r);
         p.Rect(0, 0, p.W(), p.H(), 0, 0, 0, 0.5f);                       // scrim
         p.Rect(r.card.left, r.card.top, r.card.right - r.card.left, r.card.bottom - r.card.top,
-               0.04f, 0.05f, 0.06f, 0.98f, true);
+               UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.97f);
+        p.Stroke(r.card.left, r.card.top, r.card.right - r.card.left, r.card.bottom - r.card.top,
+                 1, 1, 1, 0.15f, 1.0f);
         float cx = r.card.left + 28;
-        p.Text(cx, r.card.top + 14, 340, 22, L"PALETTES + SHUFFLE", 0.35f, 0.62f, 0.95f, 1.0f);
+        p.Text(cx, r.card.top + 14, 340, 22, L"PALETTES + SHUFFLE",
+               UI_SOFT_R, UI_SOFT_G, UI_SOFT_B, 1.0f);
         p.Text(r.close.left - 6, r.close.top, 60, 22, L"close", 0.72f, 0.74f, 0.76f, 0.9f);
         DrawCheck(p, r.master, shufflePalettes);
         p.Text(r.master.right + 12, r.master.top - 2, 340, 22, L"Shuffle palettes too", 0.92f, 0.93f, 0.94f, 0.96f);
@@ -1904,7 +1953,8 @@ struct App {
             DrawGrad(p, row.left + 30, row.top + 2, 190, 17, PaletteFnFor(i));
             bool active = (i == paletteIdx);
             p.Text(row.left + 232, row.top - 1, 200, 22, PalNameFor(i),
-                   active ? 0.45f : 0.86f, active ? 0.70f : 0.88f, active ? 1.0f : 0.90f, 0.95f);
+                   active ? UI_SOFT_R : 1.0f, active ? UI_SOFT_G : 1.0f,
+                   active ? UI_SOFT_B : 1.0f, active ? 1.0f : 0.70f);
         }
         p.Rect(cx, r.dividerY, r.card.right - 28 - cx, 1, 0.25f, 0.28f, 0.32f, 0.8f);
         p.Text(cx, r.newHeadY, 300, 24, L"New palette", 0.92f, 0.93f, 0.94f, 0.96f);
@@ -1921,15 +1971,20 @@ struct App {
         DrawGrad(p, r.preview.left, r.preview.top, r.preview.right - r.preview.left,
                  r.preview.bottom - r.preview.top, PalCustom);
         p.Rect(r.nameBox.left, r.nameBox.top, r.nameBox.right - r.nameBox.left,
-               r.nameBox.bottom - r.nameBox.top, 0.10f, 0.11f, 0.13f, 0.96f, true);
+               r.nameBox.bottom - r.nameBox.top, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.96f);
+        p.Stroke(r.nameBox.left, r.nameBox.top, r.nameBox.right - r.nameBox.left,
+                 r.nameBox.bottom - r.nameBox.top, 1, 1, 1, nameFocused ? 0.40f : 0.15f, 1.0f);
         bool placeholder = newName.empty() && !nameFocused;
         std::wstring shown = placeholder ? L"Palette name" : (newName + (nameFocused ? L"_" : L""));
         p.Text(r.nameBox.left + 10, r.nameBox.top + 6, 230, 22, shown.c_str(),
-               placeholder ? 0.5f : 0.92f, placeholder ? 0.52f : 0.93f, placeholder ? 0.54f : 0.94f, 0.95f);
+               1, 1, 1, placeholder ? 0.30f : 0.85f);
+        // Web's add button: border-ultra, bg ultra/20, ultra-soft text.
         p.Rect(r.addBtn.left, r.addBtn.top, r.addBtn.right - r.addBtn.left,
-               r.addBtn.bottom - r.addBtn.top, 0.16f, 0.34f, 0.62f, 0.98f, true);
+               r.addBtn.bottom - r.addBtn.top, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 0.20f);
+        p.Stroke(r.addBtn.left, r.addBtn.top, r.addBtn.right - r.addBtn.left,
+                 r.addBtn.bottom - r.addBtn.top, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 1.0f, 1.0f);
         p.Text(r.addBtn.left, r.addBtn.top, r.addBtn.right - r.addBtn.left, r.addBtn.bottom - r.addBtn.top,
-               L"add palette", 1.0f, 1.0f, 1.0f, 0.98f, true);
+               L"add palette", UI_SOFT_R, UI_SOFT_G, UI_SOFT_B, 1.0f, true);
     }
     // Handle a click while the panel is open. Returns true if consumed.
     bool PanelClick(int mx, int my) {
