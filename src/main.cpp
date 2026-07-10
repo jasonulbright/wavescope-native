@@ -514,6 +514,7 @@ struct App {
     ShaderHost shaderHost;
     bool shaderActive = false;
     int shaderIdx = 0;       // index into the GPU shader modes
+    bool shaderMenu = false; // shader picker dropdown open
     ID2D1BitmapRenderTarget* offscreen = nullptr;
     ID2D1SolidColorBrush* offBrush = nullptr;
     UINT offW = 0, offH = 0;
@@ -615,7 +616,10 @@ struct App {
         if (!EnsureOverlayRT(clientW, clientH)) return false;
         std::wstring sig = std::to_wstring(olW) + L"|" + std::to_wstring(olH) + L"|" +
             std::to_wstring(deckVisible) + L"|" + std::to_wstring(deckHover) + L"|" +
-            std::to_wstring(help) + L"|" + (l1 ? l1 : L"") + L"|" + (l2 ? l2 : L"");
+            std::to_wstring(help) + L"|" + std::to_wstring(shaderMenu) + L"|" +
+            std::to_wstring(DeckActive(DK_SYS)) + std::to_wstring(DeckActive(DK_MIC)) +
+            std::to_wstring(DeckActive(DK_DEMO)) + std::to_wstring(DeckActive(DK_FILE)) +
+            L"|" + (l1 ? l1 : L"") + L"|" + (l2 ? l2 : L"");
         if (palPanel) {   // capture everything the panel draws so it stays live
             sig += L"|P" + std::to_wstring(shufflePalettes) + std::to_wstring(nameFocused) +
                    std::to_wstring(paletteIdx) + L"|" + newName + L"|";
@@ -706,8 +710,9 @@ struct App {
         tap.Analyze(frame, now);
         if (calm) frame.beat *= 0.2f; // photosensitivity: tame the pulse
 
-        // Auto-hide the deck once idle (shared by every engine).
-        if (deckVisible && now - deckActivity > 2.5f) { deckVisible = false; deckHover = -1; }
+        // Auto-hide the deck once idle (shared by every engine); the open
+        // shader picker keeps it alive.
+        if (deckVisible && !shaderMenu && now - deckActivity > 2.5f) { deckVisible = false; deckHover = -1; }
         static const wchar_t* SHUF[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
 
         RECT crc; GetClientRect(hwnd, &crc);
@@ -832,6 +837,10 @@ struct App {
     // Is a button currently the active selection (for highlight)?
     bool DeckActive(int i) {
         switch (i) {
+        case DK_SYS:   return tap.Source() == AudioTap::SRC_LOOPBACK;
+        case DK_MIC:   return tap.Source() == AudioTap::SRC_MIC;
+        case DK_DEMO:  return tap.Source() == AudioTap::SRC_DEMO;
+        case DK_FILE:  return tap.Source() == AudioTap::SRC_FILE;
         case DK_MODES: return !pmActive && !shaderActive;
         case DK_MILK:  return pmActive;
         case DK_GPU:   return shaderActive;
@@ -849,9 +858,10 @@ struct App {
         case DK_MIC:   tap.SetSource(AudioTap::SRC_MIC); break;
         case DK_DEMO:  tap.SetSource(AudioTap::SRC_DEMO); break;
         case DK_FILE:  OpenFile(); break;
-        case DK_MODES: if (pmActive) ToggleProjectM(); else if (shaderActive) ToggleShader(); break;
-        case DK_MILK:  if (!pmActive) ToggleProjectM(); break;
-        case DK_GPU:   if (!shaderActive) ToggleShader(); break;
+        case DK_MODES: if (pmActive) ToggleProjectM(); else if (shaderActive) ToggleShader(); shaderMenu = false; break;
+        case DK_MILK:  if (!pmActive) ToggleProjectM(); shaderMenu = false; break;
+        case DK_GPU:   if (!shaderActive) ToggleShader(); shaderMenu = shaderActive; break; // open the picker
+        case DK_SPOT:  g_spotify.OneButton(); break;
         case DK_PREV:  CycleMode(-1); break;
         case DK_NEXT:  CycleMode(1); break;
         case DK_PAL:   CyclePalette(); break;
@@ -859,8 +869,45 @@ struct App {
         case DK_SHUF:  CycleShuffle(); break;
         case DK_CALM:  SetCalm(!calm); break;
         case DK_HUD:   hud = !hud; break;
-        case DK_SPOT:  g_spotify.OneButton(); break;
         }
+    }
+
+    // Shader picker dropdown, popped above the GPU deck button.
+    void ShaderMenuGeom(float W, float H, D2D1_RECT_F& bg, D2D1_RECT_F rows[8], int& n) {
+        D2D1_RECT_F b[DK_N]; DeckLayout(W, H, b);
+        n = shaderHost.ShaderCount(); if (n > 8) n = 8;
+        const float rw = 168, rh = 26, pad = 5;
+        float x = b[DK_GPU].left;
+        if (x + rw > W - 8) x = W - 8 - rw;
+        float bottom = b[DK_GPU].top - 8;
+        float top = bottom - (n * rh + 2 * pad);
+        bg = D2D1::RectF(x, top, x + rw, bottom);
+        for (int i = 0; i < n; i++)
+            rows[i] = D2D1::RectF(x + pad, top + pad + i * rh, x + rw - pad, top + pad + i * rh + rh - 3);
+    }
+    void DrawShaderMenu(UIPainter& p) {
+        if (!shaderMenu || !shaderActive) return;
+        D2D1_RECT_F bg, rows[8]; int n = 0;
+        ShaderMenuGeom(p.W(), p.H(), bg, rows, n);
+        p.Rect(bg.left, bg.top, bg.right - bg.left, bg.bottom - bg.top, 0.04f, 0.05f, 0.06f, 0.98f, true);
+        int cur = (shaderIdx % n + n) % n;
+        for (int i = 0; i < n; i++) {
+            bool active = (i == cur);
+            p.Rect(rows[i].left, rows[i].top, rows[i].right - rows[i].left, rows[i].bottom - rows[i].top,
+                   active ? 0.20f : 0.10f, active ? 0.42f : 0.11f, active ? 0.72f : 0.12f, 0.95f, true);
+            p.Text(rows[i].left + 10, rows[i].top, rows[i].right - rows[i].left - 14, rows[i].bottom - rows[i].top,
+                   shaderHost.ShaderName(i), active ? 1.0f : 0.86f, active ? 1.0f : 0.88f, active ? 1.0f : 0.90f, 0.96f);
+        }
+    }
+    bool ShaderMenuClick(int mx, int my) {
+        if (!shaderMenu || !shaderActive) return false;
+        D2D1_SIZE_F sz = rt->GetSize();
+        D2D1_RECT_F bg, rows[8]; int n = 0;
+        ShaderMenuGeom(sz.width, sz.height, bg, rows, n);
+        for (int i = 0; i < n; i++) if (In(rows[i], mx, my)) { shaderIdx = i; shaderMenu = false; return true; }
+        if (In(bg, mx, my)) return true;   // swallow clicks inside the menu chrome
+        shaderMenu = false;                // click elsewhere closes it
+        return false;                       // ...and falls through to the deck
     }
 
     // Mouse near the bottom edge reveals the deck; hovering keeps it alive.
@@ -868,12 +915,13 @@ struct App {
         if (palPanel) return;  // panel is modal
         RECT rc; GetClientRect(hwnd, &rc);
         int hit = DeckHitTest(mx, my);
-        if (my > rc.bottom - 110 || hit >= 0) { deckVisible = true; deckActivity = Now(); }
+        if (my > rc.bottom - 110 || hit >= 0 || shaderMenu) { deckVisible = true; deckActivity = Now(); }
         deckHover = deckVisible ? hit : -1;
     }
 
     void OnClick(int mx, int my) {
         if (PanelClick(mx, my)) return;
+        if (ShaderMenuClick(mx, my)) { deckActivity = Now(); return; }
         if (!deckVisible) return;
         int hit = DeckHitTest(mx, my);
         if (hit >= 0) { DeckDispatch(hit); deckActivity = Now(); }
@@ -891,6 +939,7 @@ struct App {
         }
         if (palPanel) { DrawPalettePanel(p); return; }  // modal: hides deck
         if (deckVisible) DrawDeckP(p);
+        if (deckVisible) DrawShaderMenu(p);   // sits above the GPU deck button
         if (help) DrawHelpP(p);
     }
 

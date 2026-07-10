@@ -92,6 +92,7 @@ struct ProjectMHost {
         wc.lpfnWndProc = ChildProc;
         wc.hInstance = inst;
         wc.lpszClassName = L"WaveScopeGL";
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);   // else the frame's resize cursor shows through
         wc.style = CS_OWNDC;
         RegisterClassW(&wc);
 
@@ -222,7 +223,10 @@ struct ProjectMHost {
         fclose(fp);
     }
 
-    void NextPreset(int dir) { if (ready) LoadPreset(presetIdx + dir, true); }
+    // Hard cut (smooth=false): projectM's soft-cut cross-fade blends the new
+    // preset in before its first frame has initialized, which flashes white on
+    // switch. A hard swap renders the new preset directly and avoids it.
+    void NextPreset(int dir) { if (ready) LoadPreset(presetIdx + dir, false); }
 
     // Repoint at a folder of presets (the user's .milk archive).
     void SetPresetFolder(const wchar_t* folder) {

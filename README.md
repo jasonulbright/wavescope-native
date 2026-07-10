@@ -43,7 +43,8 @@ Requires Visual Studio 2026 (any edition) for the compiler. Output:
   fragment shaders (plasma field, warp tunnel, fractal fold) ported 1:1 from
   the web build's WebGPU modes to GLSL 330, compiled at runtime and drawn as
   a fullscreen triangle on their own GL context, audio-uniform driven. No new
-  dependency — pure GPU + OS. `SPACE`/arrows cycle shaders.
+  dependency — pure GPU + OS. `SPACE`/arrows cycle shaders, or click `GPU` on
+  the control deck to open a dropdown and pick one directly.
 - HUD, fullscreen toggle, mode + palette cycling.
 
 The core app is one `/MT` static `.exe` (~258 KB) with zero runtime deps.
@@ -169,7 +170,9 @@ feature:
    playback on your device — which the loopback tap already visualizes. The
    refresh token is **DPAPI-encrypted** (bound to the Windows user) in
    `wavescope.ini`, so re-auth is rare. The whole flow runs on a worker
-   thread; the render loop never stalls. *Playback control needs Spotify
+   thread; the render loop never stalls. The Spotify **client ID lives in
+   `wavescope.ini`** (`[spotify] clientId=…`, seeded on first run) rather than
+   hard-coded, so it's yours to change. *Playback control needs Spotify
    Premium (the Player endpoints are Premium-only); loopback capture of
    whatever is already playing needs none of this.*
 9. ~~**Polish.**~~ DONE. System-tray icon (right-click → Show / Hide / Quit;
