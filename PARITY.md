@@ -26,7 +26,7 @@ walkthrough (`DEMO-CHECKLIST.md`).
 | GPU engine: 17 shader modes | done | all WGSL bodies ported to GLSL 330; selftest asserts 17/17 compile |
 | GPU FFT texture (1024×r8) + waveform texture (2048×r8), `spec()/specLog()/wav()` | done | selftest captures both texture-fed shaders |
 | projectM: real .milk via native libprojectM | done | |
-| Bundled presets (same files as web) | done | all 15 from `presets-milk/` |
+| Bundled presets (same files as web) | done | all 15 from `presets-milk/`; opens on WaveScope Tunnel like the web (not the alphabetical test fixtures) |
 | Classic MilkDrop library (web: ~62 Butterchurn conversions) | done, exceeded | MILK ships the 551-preset ORIGINAL MilkDrop distribution pack + shared textures (presets-classic\ + textures\, pinned — see DEPENDENCIES.md); selftest sweeps 12 through the parser |
 | User preset folder (library) + hot reload | done | exceeds web |
 | Preset blend on switch | done* | deliberate hard cut: projectM's soft-cut blends before the incoming preset's first frame and flashes white; the clean cut is the better feel. Documented deviation. |
@@ -61,10 +61,10 @@ walkthrough (`DEMO-CHECKLIST.md`).
 | Custom palettes (stops editor, include list) | done | |
 | Shuffle off/15s/30s/1m/5m/**DJ** | done | DJ hops engine + visual (= Auto-DJ) |
 | Calm mode | done | flash modes excluded, beat ×0.2 |
-| Resolution targets auto/1080/1440/2160/4320 | done | |
+| Resolution targets auto/1080/1440/2160/4320 | done* | built-in modes render at the target (offscreen); the GL engines (GPU/projectM) render at window size — a deliberate deviation: fullscreen is already native-res, and an FBO indirection buys only supersampling. The HUD shows the true pixels either way. |
 | Fullscreen | done | |
-| Auto-hiding deck (3 s idle) | done | |
-| HUD: SRC/MODE/RES/FPS/SHUFFLE/REC/now-playing | done | |
+| Auto-hiding deck (3 s idle) | done | two-cluster wrap like the web; right cluster carries calm (C) / palettes + shuffle / displays / rec (R) / fullscreen (F) / ?; TRACE, calm and palettes hide under GPU/projectM (web behavior — keys still work) |
+| HUD: SRC/MODE/RES/FPS/SHUFFLE/REC/now-playing | done | RES = actual rendered pixels, like the web |
 | Shortcuts: Space/→ ← F H P S C, M=displays, R=record, ?, Esc=restore-then-quit | done | + native E/G/L/T/B/N (documented in README) |
 | Help overlay | done | F1 / ? |
 | Design language (instrument black, ultramarine, monospace readouts) | done | system Consolas — no font embedding |
@@ -84,7 +84,7 @@ walkthrough (`DEMO-CHECKLIST.md`).
 | Feature | Status | Note |
 |---|---|---|
 | DPAPI token storage | done | |
-| Clip recording → MP4 (MF H.264 + AAC), hotkey R | done | selftest records + re-decodes a file; `wavescope-<timestamp>.mp4` (brief said `spectraviz-`; that predates the product rename — deliberate deviation, flagged) |
+| Clip recording → MP4 (MF H.264 + AAC), hotkey R + deck button | done | selftest records + re-decodes a file; `wavescope-<timestamp>.mp4` (brief said `spectraviz-`; that predates the product rename — deliberate deviation, flagged). Recording clamps to 4K — H.264 encoders stop near 4096 px, so an 8K-target take lands as 3840-wide (verified). |
 | Multi-monitor companions, one engine | done | one tap + one analysis for every window; companions vsync-off so windows don't stack vblank waits |
 | Tray icon + minimize-to-tray | done | hidden windows stop rendering entirely |
 | Always-on-top toggle | done | T + tray menu |

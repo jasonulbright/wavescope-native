@@ -3,7 +3,7 @@
 Two people, one machine, ~5 minutes. Every step lists the expected result;
 anything else is a bug worth filing. Before starting: `build.bat` (tests
 must print `tests: ALL PASS`), then `WaveScope.exe selftest` (must print
-`ALL PASS` in `wavescope-selftest.log`).
+`ALL PASS` in `wavescope-selftest.log`; it never touches your settings).
 
 ## 1. Launch + sources (60 s)
 
@@ -49,10 +49,12 @@ must print `tests: ALL PASS`), then `WaveScope.exe selftest` (must print
 
 ## 4. Record a clip (45 s)
 
-- [ ] Press `R`, let it run ~10 s, press `R` again. → HUD showed
-      `● REC mm:ss`; a `wavescope-<timestamp>.mp4` appears beside the exe.
+- [ ] Press `R` (or click the deck's `rec (R)` button), let it run ~10 s,
+      press `R` again. → HUD showed `● REC mm:ss`; a
+      `wavescope-<timestamp>.mp4` appears beside the exe.
 - [ ] Open the file in Media Player. → Correct orientation, matches what was
-      on screen (without the UI), audio in sync.
+      on screen (without the UI), audio in sync. (Even at the 8K RES target
+      the clip lands at 4K — encoder ceiling, by design.)
 
 ## 4b. OBS via Spout (optional, 30 s — needs OBS + obs-spout2-plugin)
 
