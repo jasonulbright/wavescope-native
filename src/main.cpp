@@ -486,6 +486,7 @@ static float BinLog(const AudioFrame& f, float pos) {
 // Shuffle timer choices, in seconds; 0 = off.
 static const int SHUFFLE_SECS[] = { 0, 15, 30, 60, 300 };
 static const int SHUFFLE_COUNT = (int)(sizeof(SHUFFLE_SECS) / sizeof(SHUFFLE_SECS[0]));
+static const wchar_t* SHUF_LABELS[] = { L"OFF", L"15s", L"30s", L"1m", L"5m" };
 
 // Render-resolution targets (backing-store height); 0 = auto (window size).
 struct ResOpt { const wchar_t* name; int height; };
@@ -499,6 +500,9 @@ struct CustomPalette { std::wstring name; int n = 1; float stops[3][3] = {}; };
 
 static int Clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+// Appends each display's bounding rect (defined after App, used by DisplayRects).
+static BOOL CALLBACK CollectMonitor(HMONITOR mon, HDC dc, LPRECT rc, LPARAM lp);
+
 struct App {
     HWND hwnd = nullptr;
     ID2D1Factory* d2d = nullptr;
@@ -507,6 +511,7 @@ struct App {
     IDWriteFactory* dwrite = nullptr;
     IDWriteTextFormat* hudFont = nullptr;
     IDWriteTextFormat* deckFont = nullptr;   // centered, for deck buttons
+    IDWriteTextFormat* tinyFont = nullptr;   // small, right-aligned group descriptors
     AudioTap tap;
     HINSTANCE inst = nullptr;
     ProjectMHost pmHost;
@@ -514,7 +519,10 @@ struct App {
     ShaderHost shaderHost;
     bool shaderActive = false;
     int shaderIdx = 0;       // index into the GPU shader modes
-    bool shaderMenu = false; // shader picker dropdown open
+    int deckMenu = -1;       // DK_ index whose dropdown is open, -1 = none
+    bool milkMode = false;   // projectM engine: false=PROJM (bundled), true=MILK (library)
+    std::wstring libraryFolder;  // MILK's .milk library folder (defaults to bundled)
+    int displayIdx = 0;      // monitor the window currently targets
     ID2D1BitmapRenderTarget* offscreen = nullptr;
     ID2D1SolidColorBrush* offBrush = nullptr;
     UINT offW = 0, offH = 0;
@@ -544,7 +552,8 @@ struct App {
     bool calm = false;
     int shuffleIdx = 0;      // index into SHUFFLE_SECS
     float lastShuffle = 0;
-    bool hud = true;
+    bool hud = true;         // master enable (H); when on, auto-fades on idle
+    float hudActivity = 0;   // last mouse-move time; HUD fades out after it
     bool help = false;       // F1 / ? full keymap overlay
     bool deckVisible = false;// auto-hiding bottom control bar
     int deckHover = -1;      // button under the cursor, or -1
@@ -569,12 +578,23 @@ struct App {
         dwrite->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                  14.0f, L"en-us", &hudFont);
-        dwrite->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        dwrite->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                 13.0f, L"en-us", &deckFont);
+                                 11.0f, L"en-us", &deckFont);
         if (deckFont) {
             deckFont->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             deckFont->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            deckFont->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);  // clip, never wrap
+        }
+        // Tiny dim group descriptors (SRC / MODE / TRACE / SHUFFLE / RES),
+        // right-aligned so they tuck against the group they label.
+        dwrite->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                 9.0f, L"en-us", &tinyFont);
+        if (tinyFont) {
+            tinyFont->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+            tinyFont->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            tinyFont->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         }
         CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                          IID_PPV_ARGS(&wic));
@@ -616,7 +636,8 @@ struct App {
         if (!EnsureOverlayRT(clientW, clientH)) return false;
         std::wstring sig = std::to_wstring(olW) + L"|" + std::to_wstring(olH) + L"|" +
             std::to_wstring(deckVisible) + L"|" + std::to_wstring(deckHover) + L"|" +
-            std::to_wstring(help) + L"|" + std::to_wstring(shaderMenu) + L"|" +
+            std::to_wstring(help) + L"|" + std::to_wstring(deckMenu) + L"|" +
+            std::to_wstring((int)(HudFade() * 12)) + L"|" +   // fade steps → re-render as HUD fades
             std::to_wstring(DeckActive(DK_SYS)) + std::to_wstring(DeckActive(DK_MIC)) +
             std::to_wstring(DeckActive(DK_DEMO)) + std::to_wstring(DeckActive(DK_FILE)) +
             L"|" + (l1 ? l1 : L"") + L"|" + (l2 ? l2 : L"");
@@ -632,7 +653,7 @@ struct App {
 
         olRT->BeginDraw();
         olRT->Clear(D2D1::ColorF(0, 0.0f));   // transparent
-        D2DPainter p(olRT, olBrush, hudFont, deckFont);
+        D2DPainter p(olRT, olBrush, hudFont, deckFont, tinyFont);
         DrawUI(p, l1, l2);
         olRT->EndDraw();
 
@@ -696,6 +717,7 @@ struct App {
         if (!rt) return;
         D2D1_SIZE_F size = rt->GetSize();
         float now = Now();
+        if (hudActivity == 0) hudActivity = now;   // show the HUD at launch, then fade
 
         // Shuffle timer: hop to a random other visual (or preset) on interval.
         if (SHUFFLE_SECS[shuffleIdx] > 0 && now - lastShuffle >= (float)SHUFFLE_SECS[shuffleIdx]) {
@@ -712,20 +734,18 @@ struct App {
 
         // Auto-hide the deck once idle (shared by every engine); the open
         // shader picker keeps it alive.
-        if (deckVisible && !shaderMenu && now - deckActivity > 2.5f) { deckVisible = false; deckHover = -1; }
-        static const wchar_t* SHUF[] = { L"off", L"15s", L"30s", L"1m", L"5m" };
-
+        if (deckVisible && deckMenu < 0 && now - deckActivity > 2.5f) { deckVisible = false; deckHover = -1; }
         RECT crc; GetClientRect(hwnd, &crc);
 
         // projectM engine: render OpenGL on the child window, then composite
         // the D2D-rendered UI overlay (crisp, identical to the built-in view)
         // as a texture on top.
         if (pmActive && pmHost.ready) {
-            wchar_t l1[300], l2[280];
-            swprintf_s(l1, L"WAVESCOPE  projectM  %s  (%d presets)  SRC %s  SHUF %s  FPS %d",
-                       pmHost.PresetName(), pmHost.PresetCount(), tap.SourceName(), SHUF[shuffleIdx], fps);
-            swprintf_s(l2, L"SPACE/\x2190\x2192 preset  L folder  1-4 src  S shuffle  M exit  G gpu  B spotify  F full  H hud  F1 help  ESC");
-            bool dirty = BuildOverlay(crc.right, crc.bottom, l1, l2);
+            wchar_t l1[300];
+            swprintf_s(l1, L"SRC %s\n%s %s\nRES %s\nFPS %d",
+                       tap.SourceName(), milkMode ? L"MILK" : L"PROJM", pmHost.PresetName(),
+                       RES_OPTS[resIdx].name, fps);
+            bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             pmHost.RenderEngine(frame);
             pmHost.BeginOverlay();
             pmHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
@@ -737,12 +757,10 @@ struct App {
 
         // GPU shader engine: a fullscreen fragment shader, same UI over it.
         if (shaderActive && shaderHost.ready) {
-            wchar_t l1[300], l2[280];
-            swprintf_s(l1, L"WAVESCOPE  GPU shader  %s  (%d/%d)  SRC %s  SHUF %s  FPS %d",
-                       shaderHost.ShaderName(shaderIdx), (shaderIdx % shaderHost.ShaderCount()) + 1,
-                       shaderHost.ShaderCount(), tap.SourceName(), SHUF[shuffleIdx], fps);
-            swprintf_s(l2, L"SPACE/\x2190\x2192 shader  1-4 src  S shuffle  G exit  M milk  B spotify  F full  H hud  F1 help  ESC");
-            bool dirty = BuildOverlay(crc.right, crc.bottom, l1, l2);
+            wchar_t l1[300];
+            swprintf_s(l1, L"SRC %s\nGPU %s\nRES %s\nFPS %d",
+                       tap.SourceName(), shaderHost.ShaderName(shaderIdx), RES_OPTS[resIdx].name, fps);
+            bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             shaderHost.RenderEngine(shaderIdx, frame);
             shaderHost.BeginOverlay();
             shaderHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
@@ -777,13 +795,12 @@ struct App {
             bmp->Release();
         }
 
-        wchar_t l1[300], l2[280];
-        swprintf_s(l1, L"WAVESCOPE  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d",
-                   modeIdx + 1, MODE_COUNT, mode.name, PaletteName(), tap.SourceName(),
-                   RES_OPTS[resIdx].name, offW, offH, SHUF[shuffleIdx], calm ? L"  CALM" : L"", fps);
-        swprintf_s(l2, L"SPACE/\x2190\x2192 cycle  P palette  N palettes  1-4 src  R res  S shuffle  C calm  M milk  G gpu  B spotify  F full  H hud  F1 help  ESC");
-        D2DPainter dp(rt, brush, hudFont, deckFont);
-        DrawUI(dp, l1, l2);
+        wchar_t l1[300];
+        swprintf_s(l1, L"SRC %s\nMODE %s  (%02d/%d)\nRES %s\nFPS %d%s",
+                   tap.SourceName(), mode.name, modeIdx + 1, MODE_COUNT,
+                   RES_OPTS[resIdx].name, fps, calm ? L"   CALM" : L"");
+        D2DPainter dp(rt, brush, hudFont, deckFont, tinyFont);
+        DrawUI(dp, l1, nullptr);
 
         HRESULT hr = rt->EndDraw();
         if (hr == (HRESULT)D2DERR_RECREATE_TARGET) CreateTarget();
@@ -800,27 +817,136 @@ struct App {
     // Clicking a button runs the same action as its keyboard shortcut. Drawn
     // via the shared UIPainter, so it appears identically over every engine
     // (D2D built-in modes and the GL projectM / shader engines alike).
-    enum { DK_SYS, DK_MIC, DK_DEMO, DK_FILE, DK_MODES, DK_MILK, DK_GPU,
-           DK_PREV, DK_NEXT, DK_PAL, DK_RES, DK_SHUF, DK_CALM, DK_HUD, DK_SPOT, DK_N };
+    // Laid out left-to-right in the same logical order as the web control bar:
+    // SRC | MODE-picker | ENGINE | selectors | actions | HUD.
+    enum { DK_SYS, DK_MIC, DK_FILE, DK_DEMO, DK_SPOT,   // SRC
+           DK_PREV, DK_PICK, DK_NEXT,                    // adaptive mode/preset picker
+           DK_WAVE, DK_GPU, DK_PROJM, DK_MILK,           // engines
+           DK_TRACE, DK_SHUF, DK_RES,                    // selectors
+           DK_CALM, DK_PALS, DK_DISP, DK_FULL, DK_HELP,  // actions (right cluster)
+           DK_N };
+    // The HUD has no button (web parity): H toggles it and it auto-fades when the
+    // mouse is idle. The ? overlay documents the H shortcut.
 
-    static const wchar_t* DeckLabel(int i) {
-        static const wchar_t* L_[DK_N] = {
-            L"SYS", L"MIC", L"DEMO", L"FILE", L"MODES", L"MILK", L"GPU",
-            L"\x2039", L"\x203A", L"PAL", L"RES", L"SHUF", L"CALM", L"HUD", L"SPOT" };
-        return L_[i];
+    // Each logical group ends here — used for row-break points AND (when the
+    // next group carries one) the tiny descriptor label before it.
+    static bool DeckGroupEnd(int i) {
+        return i == DK_SPOT || i == DK_NEXT || i == DK_MILK ||
+               i == DK_TRACE || i == DK_SHUF || i == DK_RES || i == DK_HELP;
+    }
+    // Tiny dim descriptor drawn before a group's first button (web-style).
+    // Empty groups (engines, actions, HUD) carry no label.
+    static const wchar_t* DeckDescriptor(int firstBtn) {
+        switch (firstBtn) {
+        case DK_SYS:   return L"SRC";
+        case DK_PREV:  return L"MODE";
+        case DK_TRACE: return L"TRACE";
+        case DK_SHUF:  return L"SHUFFLE";
+        case DK_RES:   return L"RES";
+        default:       return L"";
+        }
+    }
+    // Width reserved for a descriptor slot (0 when the group has none).
+    static float DescWidth(int firstBtn) {
+        const wchar_t* d = DeckDescriptor(firstBtn);
+        return *d ? (float)wcslen(d) * 6.0f + 12.0f : 0.0f;
     }
 
-    // Fill `out` with each button's rect and return the bar background rect.
-    D2D1_RECT_F DeckLayout(float W, float H, D2D1_RECT_F out[DK_N]) {
-        const float margin = 20, barH = 50, gap = 5, bottom = 14;
-        float x0 = margin, x1 = W - margin;
-        float y0 = H - barH - bottom, y1 = y0 + barH;
-        float bw = (x1 - x0 - gap * (int)(DK_N - 1)) / (float)DK_N;
-        for (int i = 0; i < DK_N; i++) {
-            float bx = x0 + i * (bw + gap);
-            out[i] = D2D1::RectF(bx, y0, bx + bw, y1);
+    // The center picker mirrors whichever engine is active; the value buttons
+    // show their current selection inline with a ▾, like the web dropdowns.
+    std::wstring DeckLabel(int i) {
+        const wchar_t* CH = L" \x25BE";   // ▾ dropdown chevron
+        switch (i) {
+        case DK_SYS:  return L"system"; case DK_MIC:  return L"mic";
+        case DK_FILE: return L"file";   case DK_DEMO: return L"demo"; case DK_SPOT: return L"spotify";
+        case DK_PREV: return L"\x2039"; case DK_NEXT: return L"\x203A";
+        case DK_PICK: return (pmActive   ? std::wstring(pmHost.PresetName())
+                            : shaderActive ? std::wstring(shaderHost.ShaderName(shaderIdx))
+                                           : std::wstring(MODES[modeIdx].name)) + CH;
+        case DK_WAVE:  return L"WaveScope"; case DK_GPU:   return L"GPU";
+        case DK_PROJM: return L"projectM";  case DK_MILK:  return L"milkdrop";
+        case DK_TRACE: return std::wstring(PaletteName()) + CH;
+        case DK_SHUF:  return std::wstring(SHUF_LABELS[shuffleIdx]) + CH;
+        case DK_RES:   return std::wstring(RES_OPTS[resIdx].name) + CH;
+        case DK_CALM:  return L"calm"; case DK_PALS: return L"palettes + shuffle";
+        case DK_DISP:  return std::wstring(L"displays") + CH; case DK_FULL: return L"fullscreen";
+        case DK_HELP:  return L"?";
+        default: return L"";
         }
-        return D2D1::RectF(x0 - 8, y0 - 8, x1 + 8, y1 + 8);
+    }
+
+    // Fill `out` with each button's rect and return the bar bounding rect.
+    // Two clusters, web-style: the LEFT cluster (SRC…RES) flows left-justified
+    // and wraps across as many rows as needed; the RIGHT cluster (actions)
+    // is pinned to the right edge — riding the last left row if it fits there,
+    // else dropping to its own right-aligned row. Buttons take their natural
+    // (monospace content) width; gaps are small and uniform — the tiny group
+    // descriptors do the visual grouping, not fat gaps.
+    D2D1_RECT_F DeckLayout(float W, float H, D2D1_RECT_F out[DK_N]) {
+        const float margin = 22, rowH = 28, gap = 7, groupGap = 12, rowGap = 8, bottom = 16;
+        const float charW = 6.1f, padX = 12, minBtn = 20;
+        float x0 = margin, x1 = W - margin, avail = x1 - x0;
+
+        float nat[DK_N];
+        for (int i = 0; i < DK_N; i++) {
+            float w = (float)DeckLabel(i).length() * charW + padX;
+            nat[i] = w < minBtn ? minBtn : w;
+        }
+
+        // Left-cluster groups (SRC…RES); the right cluster is DK_CALM..DK_HELP.
+        int gStart[8], gEnd[8], gCount = 0; float gNat[8];
+        for (int i = 0, s = 0; i <= DK_RES; i++) {
+            if (DeckGroupEnd(i)) {
+                gStart[gCount] = s; gEnd[gCount] = i;
+                float sum = DescWidth(s) + gap * (i - s);
+                for (int k = s; k <= i; k++) sum += nat[k];
+                gNat[gCount++] = sum; s = i + 1;
+            }
+        }
+        float rNat = gap * (DK_HELP - DK_CALM);
+        for (int i = DK_CALM; i <= DK_HELP; i++) rNat += nat[i];
+
+        // Wrap the left cluster into rows, left-justified.
+        int rowOfG[8]; float rowEnd[8]; for (float& e : rowEnd) e = x0;
+        int r = 0; float used = 0;
+        for (int g = 0; g < gCount; g++) {
+            float add = (used > 0 ? groupGap : 0) + gNat[g];
+            if (used > 0 && used + add > avail) { r++; used = 0; add = gNat[g]; }
+            rowOfG[g] = r; used += add; rowEnd[r] = x0 + used;
+        }
+        int leftRows = r + 1;
+
+        // Right cluster: same row as the last left row if it fits, else a new row.
+        int lastRow = leftRows - 1;
+        bool rightNewRow = (rowEnd[lastRow] + groupGap + rNat > x1);
+        int totalRows = leftRows + (rightNewRow ? 1 : 0);
+        float totalH = totalRows * rowH + (totalRows - 1) * rowGap;
+        float yTop = H - bottom - totalH;
+
+        // Place the left cluster.
+        float bxRow[8]; bool firstInRow[8];
+        for (int i = 0; i < 8; i++) { bxRow[i] = x0; firstInRow[i] = true; }
+        for (int g = 0; g < gCount; g++) {
+            int rr = rowOfG[g]; float y = yTop + rr * (rowH + rowGap);
+            float bx = bxRow[rr];
+            if (!firstInRow[rr]) bx += groupGap;
+            firstInRow[rr] = false;
+            bx += DescWidth(gStart[g]);   // reserve the descriptor slot
+            for (int i = gStart[g]; i <= gEnd[g]; i++) {
+                out[i] = D2D1::RectF(bx, y, bx + nat[i], y + rowH);
+                bx += nat[i] + (i < gEnd[g] ? gap : 0);
+            }
+            bxRow[rr] = bx;
+        }
+        // Place the right cluster, right-aligned.
+        int rr = rightNewRow ? leftRows : lastRow;
+        float y = yTop + rr * (rowH + rowGap);
+        float bx = x1 - rNat;
+        for (int i = DK_CALM; i <= DK_HELP; i++) {
+            out[i] = D2D1::RectF(bx, y, bx + nat[i], y + rowH);
+            bx += nat[i] + (i < DK_HELP ? gap : 0);
+        }
+        return D2D1::RectF(x0 - 8, yTop - 8, x1 + 8, H - bottom + 8);
     }
 
     int DeckHitTest(int mx, int my) {
@@ -841,123 +967,257 @@ struct App {
         case DK_MIC:   return tap.Source() == AudioTap::SRC_MIC;
         case DK_DEMO:  return tap.Source() == AudioTap::SRC_DEMO;
         case DK_FILE:  return tap.Source() == AudioTap::SRC_FILE;
-        case DK_MODES: return !pmActive && !shaderActive;
-        case DK_MILK:  return pmActive;
-        case DK_GPU:   return shaderActive;
-        case DK_SHUF:  return shuffleIdx > 0;
-        case DK_CALM:  return calm;
-        case DK_HUD:   return hud;
         case DK_SPOT:  return g_spotify.busy.load();
+        case DK_WAVE:  return !pmActive && !shaderActive;
+        case DK_GPU:   return shaderActive;
+        case DK_PROJM: return pmActive && !milkMode;
+        case DK_MILK:  return pmActive && milkMode;
+        case DK_CALM:  return calm;
+        case DK_PALS:  return palPanel;
+        case DK_FULL:  return fullscreen;
+        case DK_HELP:  return help;
+        case DK_PICK: case DK_TRACE: case DK_SHUF: case DK_RES: case DK_DISP:
+            return deckMenu == i;   // highlight whichever dropdown is open
         default:       return false;
         }
     }
 
     void DeckDispatch(int i) {
+        int prev = deckMenu; deckMenu = -1;   // any click closes an open dropdown by default
         switch (i) {
         case DK_SYS:   tap.SetSource(AudioTap::SRC_LOOPBACK); break;
         case DK_MIC:   tap.SetSource(AudioTap::SRC_MIC); break;
         case DK_DEMO:  tap.SetSource(AudioTap::SRC_DEMO); break;
         case DK_FILE:  OpenFile(); break;
-        case DK_MODES: if (pmActive) ToggleProjectM(); else if (shaderActive) ToggleShader(); shaderMenu = false; break;
-        case DK_MILK:  if (!pmActive) ToggleProjectM(); shaderMenu = false; break;
-        case DK_GPU:   if (!shaderActive) ToggleShader(); shaderMenu = shaderActive; break; // open the picker
         case DK_SPOT:  g_spotify.OneButton(); break;
-        case DK_PREV:  CycleMode(-1); break;
-        case DK_NEXT:  CycleMode(1); break;
-        case DK_PAL:   CyclePalette(); break;
-        case DK_RES:   resIdx = (resIdx + 1) % RES_COUNT; break;
-        case DK_SHUF:  CycleShuffle(); break;
+        case DK_PREV:  CyclePick(-1); break;
+        case DK_NEXT:  CyclePick(1); break;
+        case DK_WAVE:  if (pmActive) ToggleProjectM(); if (shaderActive) ToggleShader(); deckMenu = DK_PICK; break;
+        case DK_GPU:   if (pmActive) ToggleProjectM(); if (!shaderActive) ToggleShader(); deckMenu = DK_PICK; break;
+        case DK_PROJM: EnterProjectM(false); deckMenu = DK_PICK; break;
+        case DK_MILK:  EnterProjectM(true);  deckMenu = DK_PICK; break;
+        case DK_PICK: case DK_TRACE: case DK_SHUF: case DK_RES: case DK_DISP:
+                       deckMenu = (prev == i ? -1 : i); break;   // toggle this dropdown
         case DK_CALM:  SetCalm(!calm); break;
-        case DK_HUD:   hud = !hud; break;
+        case DK_PALS:  OpenPalettePanel(); break;
+        case DK_FULL:  ToggleFullscreen(); break;
+        case DK_HELP:  help = !help; break;
         }
     }
 
-    // Shader picker dropdown, popped above the GPU deck button.
-    void ShaderMenuGeom(float W, float H, D2D1_RECT_F& bg, D2D1_RECT_F rows[8], int& n) {
-        D2D1_RECT_F b[DK_N]; DeckLayout(W, H, b);
-        n = shaderHost.ShaderCount(); if (n > 8) n = 8;
-        const float rw = 168, rh = 26, pad = 5;
-        float x = b[DK_GPU].left;
-        if (x + rw > W - 8) x = W - 8 - rw;
-        float bottom = b[DK_GPU].top - 8;
-        float top = bottom - (n * rh + 2 * pad);
-        bg = D2D1::RectF(x, top, x + rw, bottom);
-        for (int i = 0; i < n; i++)
-            rows[i] = D2D1::RectF(x + pad, top + pad + i * rh, x + rw - pad, top + pad + i * rh + rh - 3);
+    // Cycle the active engine's selection (mode / shader / preset) with ‹ ›.
+    void CyclePick(int dir) {
+        if (pmActive) pmHost.NextPreset(dir);
+        else if (shaderActive) { int n = shaderHost.ShaderCount(); if (n) shaderIdx = (shaderIdx + dir + n) % n; }
+        else CycleMode(dir);
     }
-    void DrawShaderMenu(UIPainter& p) {
-        if (!shaderMenu || !shaderActive) return;
-        D2D1_RECT_F bg, rows[8]; int n = 0;
-        ShaderMenuGeom(p.W(), p.H(), bg, rows, n);
-        p.Rect(bg.left, bg.top, bg.right - bg.left, bg.bottom - bg.top, 0.04f, 0.05f, 0.06f, 0.98f, true);
-        int cur = (shaderIdx % n + n) % n;
-        for (int i = 0; i < n; i++) {
-            bool active = (i == cur);
-            p.Rect(rows[i].left, rows[i].top, rows[i].right - rows[i].left, rows[i].bottom - rows[i].top,
-                   active ? 0.20f : 0.10f, active ? 0.42f : 0.11f, active ? 0.72f : 0.12f, 0.95f, true);
-            p.Text(rows[i].left + 10, rows[i].top, rows[i].right - rows[i].left - 14, rows[i].bottom - rows[i].top,
-                   shaderHost.ShaderName(i), active ? 1.0f : 0.86f, active ? 1.0f : 0.88f, active ? 1.0f : 0.90f, 0.96f);
+
+    // Enter the projectM engine as PROJM (bundled presets) or MILK (the user's
+    // classic .milk library, if they've pointed one via the folder picker).
+    void EnterProjectM(bool library) {
+        if (shaderActive) ToggleShader();
+        if (!pmActive) ToggleProjectM();
+        milkMode = library;
+        if (pmActive && pmHost.ready && library && !libraryFolder.empty())
+            pmHost.SetPresetFolder(libraryFolder.c_str());
+    }
+
+    // ---- multi-monitor: the DISPLAYS dropdown moves the window per screen ----
+    std::vector<RECT> DisplayRects() {
+        std::vector<RECT> v;
+        EnumDisplayMonitors(nullptr, nullptr, CollectMonitor, (LPARAM)&v);
+        return v;
+    }
+    int DisplayCount() { return (int)DisplayRects().size(); }
+    void MoveToMonitor(int idx) {
+        auto v = DisplayRects();
+        if (idx < 0 || idx >= (int)v.size()) return;
+        displayIdx = idx;
+        fullscreen = true;
+        DWORD style = (DWORD)GetWindowLongPtr(hwnd, GWL_STYLE);
+        GetWindowPlacement(hwnd, &savedPlacement);
+        SetWindowLongPtr(hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+        RECT r = v[idx];
+        SetWindowPos(hwnd, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    }
+
+    // ---- generic dropdown, shared by every picker/selector button ----
+    // deckMenu holds the DK_ index of the open dropdown (-1 = none). Each
+    // anchor answers count/item/current/disabled/select for its own data.
+    int MenuCount(int a) {
+        switch (a) {
+        case DK_PICK:  return pmActive ? pmHost.PresetCount() : shaderActive ? shaderHost.ShaderCount() : MODE_COUNT;
+        case DK_TRACE: return PaletteCount();
+        case DK_SHUF:  return SHUFFLE_COUNT;
+        case DK_RES:   return RES_COUNT;
+        case DK_DISP:  return DisplayCount();
+        }
+        return 0;
+    }
+    const wchar_t* MenuItem(int a, int i) {
+        static wchar_t buf[64];
+        switch (a) {
+        case DK_PICK:  return pmActive ? pmHost.PresetNameAt(i) : shaderActive ? shaderHost.ShaderName(i) : MODES[i].name;
+        case DK_TRACE: return PalNameFor(i);
+        case DK_SHUF:  return SHUF_LABELS[i];
+        case DK_RES:   return RES_OPTS[i].name;
+        case DK_DISP:  swprintf_s(buf, L"DISPLAY %d", i + 1); return buf;
+        }
+        return L"";
+    }
+    int MenuCurrent(int a) {
+        switch (a) {
+        case DK_PICK:  return pmActive ? pmHost.PresetIndex() : shaderActive ? shaderIdx : modeIdx;
+        case DK_TRACE: return paletteIdx;
+        case DK_SHUF:  return shuffleIdx;
+        case DK_RES:   return resIdx;
+        case DK_DISP:  return displayIdx;
+        }
+        return -1;
+    }
+    bool MenuDisabled(int a, int i) {
+        return a == DK_PICK && !pmActive && !shaderActive && calm && MODES[i].flash;
+    }
+    void MenuSelect(int a, int i) {
+        switch (a) {
+        case DK_PICK:
+            if (pmActive) pmHost.LoadPreset(i, true);
+            else if (shaderActive) shaderIdx = i;
+            else modeIdx = i;
+            break;
+        case DK_TRACE: paletteIdx = i; break;
+        case DK_SHUF:  SetShuffle(i); break;
+        case DK_RES:   resIdx = i; break;
+        case DK_DISP:  MoveToMonitor(i); break;
         }
     }
-    bool ShaderMenuClick(int mx, int my) {
-        if (!shaderMenu || !shaderActive) return false;
+    // Lay the open dropdown out above its anchor button, wrapping into columns
+    // so long lists (34 modes, big preset libraries) fit above the deck.
+    void MenuGeom(int a, float W, float H, D2D1_RECT_F& bg, std::vector<D2D1_RECT_F>& rows) {
+        rows.clear();
+        int n = MenuCount(a);
+        if (n <= 0) { bg = D2D1::RectF(0, 0, 0, 0); return; }
+        D2D1_RECT_F b[DK_N]; DeckLayout(W, H, b);
+        const float rw = 168, rh = 24, pad = 5, colGap = 4, topLimit = 8;
+        float bottom = b[a].top - 8;
+        int perCol = (int)((bottom - topLimit - 2 * pad) / rh);
+        if (perCol < 1) perCol = 1;
+        if (perCol > n) perCol = n;
+        int cols = (n + perCol - 1) / perCol;
+        float menuW = cols * rw + (cols - 1) * colGap + 2 * pad;
+        float menuH = perCol * rh + 2 * pad;
+        float x = b[a].left;
+        if (x + menuW > W - 8) x = W - 8 - menuW;
+        if (x < 8) x = 8;
+        float top = bottom - menuH;
+        if (top < topLimit) top = topLimit;
+        bg = D2D1::RectF(x, top, x + menuW, top + menuH);
+        rows.resize(n);
+        for (int i = 0; i < n; i++) {
+            int c = i / perCol, r = i % perCol;
+            float rx = x + pad + c * (rw + colGap);
+            float ry = top + pad + r * rh;
+            rows[i] = D2D1::RectF(rx, ry, rx + rw, ry + rh - 2);
+        }
+    }
+    void DrawMenu(UIPainter& p) {
+        if (deckMenu < 0) return;
+        D2D1_RECT_F bg; std::vector<D2D1_RECT_F> rows;
+        MenuGeom(deckMenu, p.W(), p.H(), bg, rows);
+        if (rows.empty()) return;
+        p.Rect(bg.left, bg.top, bg.right - bg.left, bg.bottom - bg.top, 0.04f, 0.05f, 0.06f, 0.98f, true);
+        int cur = MenuCurrent(deckMenu);
+        for (int i = 0; i < (int)rows.size(); i++) {
+            bool active = (i == cur), off = MenuDisabled(deckMenu, i);
+            p.Rect(rows[i].left, rows[i].top, rows[i].right - rows[i].left, rows[i].bottom - rows[i].top,
+                   active ? 0.20f : 0.10f, active ? 0.42f : 0.11f, active ? 0.72f : 0.12f, 0.95f, true);
+            float t = off ? 0.34f : (active ? 1.0f : 0.86f);
+            p.Text(rows[i].left + 10, rows[i].top, rows[i].right - rows[i].left - 14, rows[i].bottom - rows[i].top,
+                   MenuItem(deckMenu, i), t, active ? 1.0f : (off ? 0.36f : 0.88f), active ? 1.0f : (off ? 0.38f : 0.90f), 0.96f);
+        }
+    }
+    bool MenuClick(int mx, int my) {
+        if (deckMenu < 0) return false;
         D2D1_SIZE_F sz = rt->GetSize();
-        D2D1_RECT_F bg, rows[8]; int n = 0;
-        ShaderMenuGeom(sz.width, sz.height, bg, rows, n);
-        for (int i = 0; i < n; i++) if (In(rows[i], mx, my)) { shaderIdx = i; shaderMenu = false; return true; }
+        D2D1_RECT_F bg; std::vector<D2D1_RECT_F> rows;
+        MenuGeom(deckMenu, sz.width, sz.height, bg, rows);
+        for (int i = 0; i < (int)rows.size(); i++)
+            if (In(rows[i], mx, my)) {
+                if (MenuDisabled(deckMenu, i)) return true;   // disabled: swallow, don't select
+                MenuSelect(deckMenu, i); deckMenu = -1; return true;
+            }
         if (In(bg, mx, my)) return true;   // swallow clicks inside the menu chrome
-        shaderMenu = false;                // click elsewhere closes it
-        return false;                       // ...and falls through to the deck
+        deckMenu = -1;                     // click elsewhere closes it
+        return false;                      // ...and falls through to the deck
     }
 
     // Mouse near the bottom edge reveals the deck; hovering keeps it alive.
     void OnMouseMove(int mx, int my) {
+        hudActivity = Now();   // any movement wakes the HUD (then it fades on idle)
         if (palPanel) return;  // panel is modal
         RECT rc; GetClientRect(hwnd, &rc);
         int hit = DeckHitTest(mx, my);
-        if (my > rc.bottom - 110 || hit >= 0 || shaderMenu) { deckVisible = true; deckActivity = Now(); }
+        if (my > rc.bottom - 175 || hit >= 0 || deckMenu >= 0) { deckVisible = true; deckActivity = Now(); }
         deckHover = deckVisible ? hit : -1;
     }
 
     void OnClick(int mx, int my) {
         if (PanelClick(mx, my)) return;
-        if (ShaderMenuClick(mx, my)) { deckActivity = Now(); return; }
+        if (MenuClick(mx, my)) { deckActivity = Now(); return; }
         if (!deckVisible) return;
         int hit = DeckHitTest(mx, my);
         if (hit >= 0) { DeckDispatch(hit); deckActivity = Now(); }
     }
 
+    // HUD opacity: full while the mouse is active, fading to 0 after ~2s idle;
+    // 0 when the user has toggled it off with H. No button — the ? overlay
+    // documents the shortcut (web parity).
+    float HudFade() {
+        if (!hud) return 0.0f;
+        const float HOLD = 2.0f, FADE = 0.9f;
+        float f = 1.0f - (Now() - hudActivity - HOLD) / FADE;
+        return f < 0 ? 0 : (f > 1 ? 1 : f);
+    }
+
     // The whole on-screen UI, drawn through the abstract painter so it renders
     // identically over every engine. `l1`/`l2` are the engine-specific HUD
     // status + hint lines built by Render.
-    void DrawUI(UIPainter& p, const wchar_t* l1, const wchar_t* l2) {
-        float W = p.W(), H = p.H();
-        if (hud) {
-            p.Rect(0, 0, W, 46, 0.043f, 0.051f, 0.047f, 0.42f);
-            if (l1) p.Text(16, 4, W - 32, 20, l1, 0.95f, 0.96f, 0.95f, 0.92f);
-            if (l2) p.Text(16, 24, W - 32, 20, l2, 0.80f, 0.83f, 0.82f, 0.80f);
+    void DrawUI(UIPainter& p, const wchar_t* l1, const wchar_t* /*l2*/) {
+        float hf = HudFade();
+        if (l1 && hf > 0.01f) {
+            // Compact top-left status stack (SRC / MODE / RES / FPS), like the web.
+            p.Text(16, 10, 460, 108, l1, 0.90f, 0.93f, 0.92f, 0.92f * hf);
         }
         if (palPanel) { DrawPalettePanel(p); return; }  // modal: hides deck
         if (deckVisible) DrawDeckP(p);
-        if (deckVisible) DrawShaderMenu(p);   // sits above the GPU deck button
+        if (deckVisible) DrawMenu(p);         // open dropdown sits above its anchor
         if (help) DrawHelpP(p);
     }
 
     void DrawDeckP(UIPainter& p) {
         D2D1_RECT_F b[DK_N];
-        D2D1_RECT_F bar = DeckLayout(p.W(), p.H(), b);
-        p.Rect(bar.left, bar.top, bar.right - bar.left, bar.bottom - bar.top,
-               0.03f, 0.04f, 0.04f, 0.86f, true);
+        DeckLayout(p.W(), p.H(), b);   // no full-width backdrop — let the bar breathe
         for (int i = 0; i < DK_N; i++) {
             bool active = DeckActive(i), hover = (i == deckHover);
-            float br_ = active ? 0.20f : (hover ? 0.16f : 0.09f);
-            float bg_ = active ? 0.42f : (hover ? 0.19f : 0.11f);
-            float bb_ = active ? 0.72f : (hover ? 0.22f : 0.12f);
-            p.Rect(b[i].left, b[i].top, b[i].right - b[i].left, b[i].bottom - b[i].top,
-                   br_, bg_, bb_, 0.93f, true);
-            float tr = active ? 1.0f : 0.86f, tg = active ? 1.0f : 0.88f, tb = active ? 1.0f : 0.88f;
-            p.Text(b[i].left, b[i].top, b[i].right - b[i].left, b[i].bottom - b[i].top,
-                   DeckLabel(i), tr, tg, tb, 0.96f, true);
+            float w = b[i].right - b[i].left, h = b[i].bottom - b[i].top;
+            // Each button carries only a faint dark fill for legibility + a thin
+            // outline. Active = subtle blue; hover = a touch brighter.
+            if (active) {
+                p.Rect(b[i].left, b[i].top, w, h, 0.15f, 0.33f, 0.58f, 0.55f, true);
+                p.Stroke(b[i].left, b[i].top, w, h, 0.36f, 0.62f, 0.95f, 0.95f, 1.2f, true);
+            } else {
+                p.Rect(b[i].left, b[i].top, w, h, 0.05f, 0.06f, 0.07f, hover ? 0.55f : 0.40f, true);
+                p.Stroke(b[i].left, b[i].top, w, h, 0.36f, 0.42f, 0.49f, hover ? 0.80f : 0.45f, 1.0f, true);
+            }
+            float tr = active ? 1.0f : 0.78f, tg = active ? 1.0f : 0.83f, tb = active ? 1.0f : 0.85f;
+            p.Text(b[i].left, b[i].top, w, h, DeckLabel(i).c_str(), tr, tg, tb, active ? 1.0f : 0.92f, true);
+            // Tiny dim descriptor tucked into the reserved slot left of the group.
+            const wchar_t* d = DeckDescriptor(i);
+            if (*d) {
+                float dw = DescWidth(i);
+                p.Text(b[i].left - dw, b[i].top, dw - 5, h, d, 0.50f, 0.56f, 0.58f, 0.75f, true, true);
+            }
         }
     }
 
@@ -979,7 +1239,7 @@ struct App {
             L"C              calm mode (photosensitive-safe)\n"
             L"R              resolution (AUTO / 1080 / 1440 / 4K / 8K)\n"
             L"L              MilkDrop preset folder\n"
-            L"F              fullscreen        H   HUD on/off\n"
+            L"F              fullscreen        H   HUD (auto-fades on idle)\n"
             L"F1 / ?         this help         ESC quit\n"
             L"\n"
             L"Launch: WaveScope.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
@@ -1105,6 +1365,7 @@ struct App {
     }
 
     void CycleShuffle() { shuffleIdx = (shuffleIdx + 1) % SHUFFLE_COUNT; lastShuffle = Now(); }
+    void SetShuffle(int i) { shuffleIdx = Clampi(i, 0, SHUFFLE_COUNT - 1); lastShuffle = Now(); }
 
     // ----- palettes (built-in + user-created) -----
 
@@ -1408,6 +1669,7 @@ struct App {
         SafeRelease(&brush);
         SafeRelease(&rt);
         SafeRelease(&deckFont);
+        SafeRelease(&tinyFont);
         SafeRelease(&hudFont);
         SafeRelease(&dwrite);
         SafeRelease(&d2d);
