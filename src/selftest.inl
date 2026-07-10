@@ -134,24 +134,38 @@ static int RunSelfTest(App* v) {
     if (!v->shaderActive || !v->shaderHost.ready) {
         out(L"shader: engine failed to start -> FAIL"); rc = 1;
     } else {
+        int compiled = v->shaderHost.CompiledCount();
+        if (compiled != v->shaderHost.ShaderCount()) {
+            out(L"shader: only %d/%d programs compiled -> FAIL (see debugger output)",
+                compiled, v->shaderHost.ShaderCount());
+            rc = 1;
+        }
         int keepShader = v->shaderIdx;
         for (int si = 0; si < v->shaderHost.ShaderCount(); si++) {
             v->shaderIdx = si;
             for (int k = 0; k < 8; k++) { pump(); v->Render(); }
         }
-        out(L"shader: swept all %d shaders", v->shaderHost.ShaderCount());
+        out(L"shader: swept all %d shaders (%d compiled)", v->shaderHost.ShaderCount(), compiled);
+        // Capture the two texture-fed shaders (FFT + waveform paths) and one
+        // pure-field shader; each must produce a lit frame.
+        const int capIdx[3] = { 14 /*Spectrum bars*/, 16 /*Scope lines*/, 1 /*Warp tunnel*/ };
+        const wchar_t* capName[3] = { L"specbars", L"scopelines", L"warptunnel" };
+        for (int c = 0; c < 3; c++) {
+            v->shaderIdx = capIdx[c] % v->shaderHost.ShaderCount();
+            for (int i = 0; i < 40; i++) { pump(); v->Render(); }
+            AudioFrame f; v->tap.Analyze(f, v->Now());
+            v->shaderHost.RenderEngine(v->shaderIdx, f);   // render, don't present
+            std::vector<uint8_t> px; int w = 0, h = 0;
+            bool cap = v->shaderHost.ReadBack(px, w, h);
+            float lit = cap ? StLitPct(px.data(), px.size()) : 0.0f;
+            if (cap) StWritePng((dir + L"selftest-shader-" + capName[c] + L".png").c_str(),
+                                px.data(), w, h, true);
+            bool pass = cap && lit > 0.2f;
+            out(L"shader: %s %dx%d lit=%.1f%% -> %s",
+                v->shaderHost.ShaderName(v->shaderIdx), w, h, lit, pass ? L"PASS" : L"FAIL");
+            if (!pass) rc = 1;
+        }
         v->shaderIdx = keepShader;
-        for (int i = 0; i < 60; i++) { pump(); v->Render(); }
-        AudioFrame f; v->tap.Analyze(f, v->Now());
-        v->shaderHost.RenderEngine(v->shaderIdx, f);   // render, don't present
-        std::vector<uint8_t> px; int w = 0, h = 0;
-        bool cap = v->shaderHost.ReadBack(px, w, h);
-        float lit = cap ? StLitPct(px.data(), px.size()) : 0.0f;
-        if (cap) StWritePng((dir + L"selftest-shader.png").c_str(), px.data(), w, h, true);
-        bool pass = cap && lit > 0.2f;
-        out(L"shader: %s %dx%d lit=%.1f%% -> %s",
-            v->shaderHost.ShaderName(v->shaderIdx), w, h, lit, pass ? L"PASS" : L"FAIL");
-        if (!pass) rc = 1;
         v->ToggleShader();
     }
 
