@@ -663,6 +663,10 @@ struct App {
             std::to_wstring((int)(HudFade() * 12)) + L"|" +   // fade steps → re-render as HUD fades
             std::to_wstring(DeckActive(DK_SYS)) + std::to_wstring(DeckActive(DK_MIC)) +
             std::to_wstring(DeckActive(DK_DEMO)) + std::to_wstring(DeckActive(DK_FILE)) +
+            // Selector labels + rec state also live on deck buttons: cycling
+            // them by key (P/S/R) must dirty the overlay even when l1 is quiet.
+            L"|" + std::to_wstring(paletteIdx) + L"." + std::to_wstring(shuffleIdx) +
+            L"." + std::to_wstring(resIdx) + L"." + std::to_wstring(rec.Active()) +
             L"|" + (l1 ? l1 : L"") + L"|" + (l2 ? l2 : L"");
         if (palPanel) {   // capture everything the panel draws so it stays live
             sig += L"|P" + std::to_wstring(shufflePalettes) + std::to_wstring(nameFocused) +
@@ -903,10 +907,12 @@ struct App {
         if (pmActive && pmHost.ready) {
             // _TRUNCATE everywhere a preset/file name flows into a HUD buffer:
             // swprintf_s would abort the process if a long name didn't fit.
+            // RES shows the real backing pixels (web parity); the GL engines
+            // render at window size, whatever the deck's RES target says.
             wchar_t l1[512];
-            _snwprintf_s(l1, _TRUNCATE, L"SRC %s\n%s %s\nRES %s\nFPS %d%s",
+            _snwprintf_s(l1, _TRUNCATE, L"SRC %s\n%s %s\nRES %ldX%ld\nFPS %d%s",
                        g_tap.SourceName(), milkMode ? L"MILK" : L"PROJM", pmHost.PresetName(),
-                       RES_OPTS[resIdx].name, fps, extra);
+                       crc.right, crc.bottom, fps, extra);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             float pcm[4800];   // up to 100 ms of new samples per frame
             int newN = g_tap.ReadNew(pmCursor, pcm, 4800);
@@ -933,8 +939,9 @@ struct App {
         // GPU shader engine: a fullscreen fragment shader, same UI over it.
         if (shaderActive && shaderHost.ready) {
             wchar_t l1[512];
-            _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nGPU %s\nRES %s\nFPS %d%s",
-                       g_tap.SourceName(), shaderHost.ShaderName(shaderIdx), RES_OPTS[resIdx].name, fps, extra);
+            _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nGPU %s\nRES %ldX%ld\nFPS %d%s",
+                       g_tap.SourceName(), shaderHost.ShaderName(shaderIdx),
+                       crc.right, crc.bottom, fps, extra);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             shaderHost.RenderEngine(shaderIdx, frame);
             if (shaderHost.lost == 0) {
@@ -1022,10 +1029,13 @@ struct App {
             }
         }
 
+        // RES = the pixels the modes actually draw (offscreen target, or the
+        // clamped recording surface while recording) — web parity.
+        UINT rw = recording ? recW : offW, rh = recording ? recH : offH;
         wchar_t l1[512];
-        _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nMODE %s  (%02d/%d)\nRES %s\nFPS %d%s%s",
+        _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nMODE %s  (%02d/%d)\nRES %uX%u\nFPS %d%s%s",
                    g_tap.SourceName(), mode.name, modeIdx + 1, MODE_COUNT,
-                   RES_OPTS[resIdx].name, fps, calm ? L"   CALM" : L"", extra);
+                   rw, rh, fps, calm ? L"   CALM" : L"", extra);
         float sc = UiScale();
         rt->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc));
         D2DPainter dp(rt, brush, hudFont, deckFont, tinyFont, sc);
@@ -1053,7 +1063,7 @@ struct App {
            DK_PREV, DK_PICK, DK_NEXT,                    // adaptive mode/preset picker
            DK_WAVE, DK_GPU, DK_PROJM, DK_MILK,           // engines
            DK_TRACE, DK_SHUF, DK_RES,                    // selectors
-           DK_CALM, DK_PALS, DK_DISP, DK_FULL, DK_HELP,  // actions (right cluster)
+           DK_CALM, DK_PALS, DK_DISP, DK_REC, DK_FULL, DK_HELP, // actions (right cluster)
            DK_N };
     // The HUD has no button (web parity): H toggles it and it auto-fades when the
     // mouse is idle. The ? overlay documents the H shortcut.
@@ -1064,12 +1074,19 @@ struct App {
         return i == DK_SPOT || i == DK_NEXT || i == DK_MILK ||
                i == DK_TRACE || i == DK_SHUF || i == DK_RES || i == DK_HELP;
     }
+    // Buttons that don't apply to the active engine (web parity: trace
+    // palettes, calm and the palette panel are built-in-engine concerns; the
+    // C/P/N keys still work everywhere).
+    bool DeckHidden(int i) {
+        bool alt = pmActive || shaderActive;
+        return alt && (i == DK_TRACE || i == DK_CALM || i == DK_PALS);
+    }
     // Tiny dim descriptor drawn before a group's first button (web-style).
     // Empty groups (engines, actions, HUD) carry no label.
-    static const wchar_t* DeckDescriptor(int firstBtn) {
+    const wchar_t* DeckDescriptor(int firstBtn) {
         switch (firstBtn) {
         case DK_SYS:   return L"SRC";
-        case DK_PREV:  return L"MODE";
+        case DK_PREV:  return pmActive ? L"PRESET" : L"MODE";
         case DK_TRACE: return L"TRACE";
         case DK_SHUF:  return L"SHUFFLE";
         case DK_RES:   return L"RES";
@@ -1077,7 +1094,7 @@ struct App {
         }
     }
     // Width reserved for a descriptor slot (0 when the group has none).
-    static float DescWidth(int firstBtn) {
+    float DescWidth(int firstBtn) {
         const wchar_t* d = DeckDescriptor(firstBtn);
         return *d ? (float)wcslen(d) * 6.0f + 12.0f : 0.0f;
     }
@@ -1098,8 +1115,10 @@ struct App {
         case DK_TRACE: return std::wstring(PaletteName()) + CH;
         case DK_SHUF:  return std::wstring(SHUF_LABELS[shuffleIdx]) + CH;
         case DK_RES:   return std::wstring(RES_OPTS[resIdx].name) + CH;
-        case DK_CALM:  return L"calm"; case DK_PALS: return L"palettes + shuffle";
-        case DK_DISP:  return std::wstring(L"displays") + CH; case DK_FULL: return L"fullscreen";
+        case DK_CALM:  return L"calm (C)"; case DK_PALS: return L"palettes + shuffle";
+        case DK_DISP:  return std::wstring(L"displays") + CH;
+        case DK_REC:   return rec.Active() ? L"stop rec (R)" : L"rec (R)";
+        case DK_FULL:  return L"fullscreen (F)";
         case DK_HELP:  return L"?";
         default: return L"";
         }
@@ -1117,10 +1136,13 @@ struct App {
         const float charW = 6.1f, padX = 12, minBtn = 20;
         float x0 = margin, x1 = W - margin, avail = x1 - x0;
 
+        // Hidden buttons (engine-dependent, web parity) take no space at all;
+        // they land on a dead rect no hit-test can reach.
+        const D2D1_RECT_F dead = D2D1::RectF(-9, -9, -9, -9);
         float nat[DK_N];
         for (int i = 0; i < DK_N; i++) {
             float w = (float)DeckLabel(i).length() * charW + padX;
-            nat[i] = w < minBtn ? minBtn : w;
+            nat[i] = DeckHidden(i) ? 0.0f : (w < minBtn ? minBtn : w);
         }
 
         // Left-cluster groups (SRC…RES); the right cluster is DK_CALM..DK_HELP.
@@ -1128,18 +1150,22 @@ struct App {
         for (int i = 0, s = 0; i <= DK_RES; i++) {
             if (DeckGroupEnd(i)) {
                 gStart[gCount] = s; gEnd[gCount] = i;
-                float sum = DescWidth(s) + gap * (i - s);
-                for (int k = s; k <= i; k++) sum += nat[k];
+                float sum = 0; int vis = 0;
+                for (int k = s; k <= i; k++) if (!DeckHidden(k)) { sum += nat[k]; vis++; }
+                if (vis) sum += DescWidth(s) + gap * (vis - 1);
                 gNat[gCount++] = sum; s = i + 1;
             }
         }
-        float rNat = gap * (DK_HELP - DK_CALM);
-        for (int i = DK_CALM; i <= DK_HELP; i++) rNat += nat[i];
+        float rNat = 0; int rVis = 0;
+        for (int i = DK_CALM; i <= DK_HELP; i++)
+            if (!DeckHidden(i)) { rNat += nat[i]; rVis++; }
+        if (rVis > 1) rNat += gap * (rVis - 1);
 
         // Wrap the left cluster into rows, left-justified.
         int rowOfG[8]; float rowEnd[8]; for (float& e : rowEnd) e = x0;
         int r = 0; float used = 0;
         for (int g = 0; g < gCount; g++) {
+            if (gNat[g] <= 0) { rowOfG[g] = r; continue; }   // fully hidden group
             float add = (used > 0 ? groupGap : 0) + gNat[g];
             if (used > 0 && used + add > avail) { r++; used = 0; add = gNat[g]; }
             rowOfG[g] = r; used += add; rowEnd[r] = x0 + used;
@@ -1157,12 +1183,17 @@ struct App {
         float bxRow[8]; bool firstInRow[8];
         for (int i = 0; i < 8; i++) { bxRow[i] = x0; firstInRow[i] = true; }
         for (int g = 0; g < gCount; g++) {
+            if (gNat[g] <= 0) {
+                for (int i = gStart[g]; i <= gEnd[g]; i++) out[i] = dead;
+                continue;
+            }
             int rr = rowOfG[g]; float y = yTop + rr * (rowH + rowGap);
             float bx = bxRow[rr];
             if (!firstInRow[rr]) bx += groupGap;
             firstInRow[rr] = false;
             bx += DescWidth(gStart[g]);   // reserve the descriptor slot
             for (int i = gStart[g]; i <= gEnd[g]; i++) {
+                if (DeckHidden(i)) { out[i] = dead; continue; }
                 out[i] = D2D1::RectF(bx, y, bx + nat[i], y + rowH);
                 bx += nat[i] + (i < gEnd[g] ? gap : 0);
             }
@@ -1173,8 +1204,9 @@ struct App {
         float y = yTop + rr * (rowH + rowGap);
         float bx = x1 - rNat;
         for (int i = DK_CALM; i <= DK_HELP; i++) {
+            if (DeckHidden(i)) { out[i] = dead; continue; }
             out[i] = D2D1::RectF(bx, y, bx + nat[i], y + rowH);
-            bx += nat[i] + (i < DK_HELP ? gap : 0);
+            bx += nat[i] + gap;
         }
         return D2D1::RectF(x0 - 8, yTop - 8, x1 + 8, H - bottom + 8);
     }
@@ -1206,6 +1238,7 @@ struct App {
         case DK_MILK:  return pmActive && milkMode;
         case DK_CALM:  return calm;
         case DK_PALS:  return palPanel;
+        case DK_REC:   return rec.Active();
         case DK_FULL:  return fullscreen;
         case DK_HELP:  return help;
         case DK_PICK: case DK_TRACE: case DK_SHUF: case DK_RES: case DK_DISP:
@@ -1232,6 +1265,7 @@ struct App {
                        deckMenu = (prev == i ? -1 : i); break;   // toggle this dropdown
         case DK_CALM:  SetCalm(!calm); break;
         case DK_PALS:  OpenPalettePanel(); break;
+        case DK_REC:   ToggleRecord(); break;
         case DK_FULL:  ToggleFullscreen(); break;
         case DK_HELP:  help = !help; break;
         }
@@ -1383,7 +1417,7 @@ struct App {
     void MenuGeom(int a, float W, float H, D2D1_RECT_F& bg, std::vector<D2D1_RECT_F>& rows) {
         rows.clear();
         int n = MenuCount(a);
-        if (n <= 0) { bg = D2D1::RectF(0, 0, 0, 0); return; }
+        if (n <= 0 || DeckHidden(a)) { bg = D2D1::RectF(0, 0, 0, 0); return; }
         D2D1_RECT_F b[DK_N]; DeckLayout(W, H, b);
         const float rw = 168, rh = 24, pad = 5, colGap = 4, topLimit = 8;
         float bottom = b[a].top - 8;
@@ -1491,6 +1525,7 @@ struct App {
         D2D1_RECT_F b[DK_N];
         DeckLayout(p.W(), p.H(), b);   // no full-width backdrop — let the bar breathe
         for (int i = 0; i < DK_N; i++) {
+            if (DeckHidden(i)) continue;
             bool active = DeckActive(i), hover = (i == deckHover);
             float w = b[i].right - b[i].left, h = b[i].bottom - b[i].top;
             // Each button carries only a faint dark fill for legibility + a thin
