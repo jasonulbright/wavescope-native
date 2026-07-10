@@ -236,6 +236,13 @@ struct ProjectMHost {
 
     const wchar_t* PresetName() const { return curName.c_str(); }
     int PresetCount() const { return (int)presetPaths.size(); }
+    int PresetIndex() const { return presetIdx; }
+    // Bare filename of preset i, for the picker dropdown.
+    const wchar_t* PresetNameAt(int i) const {
+        if (i < 0 || i >= (int)presetPaths.size()) return L"";
+        const wchar_t* base = wcsrchr(presetPaths[i].c_str(), L'\\');
+        return base ? base + 1 : presetPaths[i].c_str();
+    }
 
     void Show(bool on) {
         if (child) ShowWindow(child, on ? SW_SHOW : SW_HIDE);
