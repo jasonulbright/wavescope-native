@@ -25,20 +25,25 @@ struct UIPainter {
                       bool center = false, bool tiny = false) = 0;
 };
 
-// Direct2D backend: used for the built-in modes' frame.
+// Direct2D backend: used for the built-in modes' frame. `scale` is the
+// monitor DPI factor: the caller sets a matching scale transform on the
+// target, so layout code sees logical (96-DPI) dimensions here while text
+// and geometry rasterize at full physical resolution.
 struct D2DPainter : UIPainter {
     ID2D1RenderTarget* rt;
     ID2D1SolidColorBrush* br;
     IDWriteTextFormat* leftFont;    // top-left, multi-line (HUD, help)
     IDWriteTextFormat* centerFont;  // centered (deck buttons)
     IDWriteTextFormat* tinyFont;    // small right-aligned (group descriptors)
+    float scale;
 
     D2DPainter(ID2D1RenderTarget* r, ID2D1SolidColorBrush* b,
-               IDWriteTextFormat* lf, IDWriteTextFormat* cf, IDWriteTextFormat* tf = nullptr)
-        : rt(r), br(b), leftFont(lf), centerFont(cf), tinyFont(tf) {}
+               IDWriteTextFormat* lf, IDWriteTextFormat* cf, IDWriteTextFormat* tf = nullptr,
+               float sc = 1.0f)
+        : rt(r), br(b), leftFont(lf), centerFont(cf), tinyFont(tf), scale(sc > 0 ? sc : 1.0f) {}
 
-    float W() override { return rt->GetSize().width; }
-    float H() override { return rt->GetSize().height; }
+    float W() override { return rt->GetSize().width / scale; }
+    float H() override { return rt->GetSize().height / scale; }
 
     void Rect(float x, float y, float w, float h,
               float r, float g, float b, float a, bool round) override {
