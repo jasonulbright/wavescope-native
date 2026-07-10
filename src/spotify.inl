@@ -105,6 +105,8 @@ static SpResp SpHttps(const wchar_t* host, const wchar_t* verb, const wchar_t* p
     HINTERNET s = WinHttpOpen(L"WaveScope/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!s) return r;
+    // Bounded waits so a hung request can't stall app shutdown behind a join.
+    WinHttpSetTimeouts(s, 5000, 10000, 15000, 15000);
     HINTERNET c = WinHttpConnect(s, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
     HINTERNET q = c ? WinHttpOpenRequest(c, verb, path, nullptr, WINHTTP_NO_REFERER,
                                          WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
@@ -161,56 +163,80 @@ static std::string SpFirstDeviceId(const std::string& j) {
     return id == "null" ? "" : id;
 }
 
+// Extract a query parameter from the request LINE only (never the headers),
+// so header content can't spoof code/state.
 static std::string SpQueryParam(const std::string& req, const char* key) {
+    size_t eol = req.find("\r\n");
+    std::string line = req.substr(0, eol == std::string::npos ? req.size() : eol);
     std::string k = std::string(key) + "=";
-    size_t p = req.find('?'); if (p == std::string::npos) p = 0;
-    p = req.find(k, p); if (p == std::string::npos) return "";
+    size_t p = line.find('?'); if (p == std::string::npos) return "";
+    p = line.find(k, p); if (p == std::string::npos) return "";
     p += k.size(); size_t e = p;
-    while (e < req.size() && req[e] != '&' && req[e] != ' ' && req[e] != '\r' &&
-           req[e] != '\n' && req[e] != '#') e++;
-    return SpUrlDecode(req.substr(p, e - p));
+    while (e < line.size() && line[e] != '&' && line[e] != ' ' && line[e] != '#') e++;
+    return SpUrlDecode(line.substr(p, e - p));
 }
 
-// Listen on 127.0.0.1:8888 for the OAuth redirect; return the auth code once
-// the browser hits it (validating the CSRF state). Times out after 3 minutes.
-static bool SpWaitForCode(std::string& code, const std::string& expectState) {
-    WSADATA w; if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false;
-    bool ok = false;
+// Bind the OAuth redirect listener on 127.0.0.1:8888. Must succeed BEFORE the
+// browser opens: an already-consented account redirects instantly, and the
+// listener has to be there to catch it. Exclusive bind so no other local
+// process can steal the port mid-flow.
+static SOCKET SpListen() {
     SOCKET srv = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv != INVALID_SOCKET) {
-        BOOL yes = TRUE; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
-        sockaddr_in a = {}; a.sin_family = AF_INET; a.sin_port = htons(8888);
-        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        if (bind(srv, (sockaddr*)&a, sizeof(a)) == 0 && listen(srv, 1) == 0) {
-            fd_set rs; FD_ZERO(&rs); FD_SET(srv, &rs);
-            timeval tv = { 180, 0 };
-            if (select(0, &rs, nullptr, nullptr, &tv) > 0) {
-                SOCKET cS = accept(srv, nullptr, nullptr);
-                if (cS != INVALID_SOCKET) {
-                    char buf[4096]; int n = recv(cS, buf, sizeof(buf) - 1, 0);
-                    if (n > 0) {
-                        buf[n] = 0; std::string req(buf);
-                        code = SpQueryParam(req, "code");
-                        ok = !code.empty() && SpQueryParam(req, "state") == expectState;
-                    }
-                    const char* resp = ok
-                        ? "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
-                          "<html><body style='font-family:Segoe UI,sans-serif;background:#0b0d0c;"
-                          "color:#e8eae8;text-align:center;padding-top:12%'><h2>WaveScope connected</h2>"
-                          "<p>You can close this tab and return to the visualizer.</p></body></html>"
-                        : "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nWaveScope auth failed.";
-                    send(cS, resp, (int)strlen(resp), 0);
-                    closesocket(cS);
-                }
+    if (srv == INVALID_SOCKET) return srv;
+    BOOL yes = TRUE;
+    setsockopt(srv, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char*)&yes, sizeof(yes));
+    sockaddr_in a = {};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(8888);
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   // loopback only, never 0.0.0.0
+    if (bind(srv, (sockaddr*)&a, sizeof(a)) != 0 || listen(srv, 1) != 0) {
+        closesocket(srv);
+        return INVALID_SOCKET;
+    }
+    return srv;
+}
+
+// Accept connections until one carries a code with the expected CSRF `state`
+// (a stray local connection must not kill a pending login), the 3-minute
+// deadline passes, or the app is shutting down. Responses are static; nothing
+// attacker-controlled is ever echoed back.
+static bool SpWaitForCode(SOCKET srv, std::string& code, const std::string& expectState,
+                          std::atomic<bool>& quit) {
+    bool ok = false;
+    ULONGLONG deadline = GetTickCount64() + 180000;
+    while (!ok && !quit.load() && GetTickCount64() < deadline) {
+        fd_set rs; FD_ZERO(&rs); FD_SET(srv, &rs);
+        timeval tv = { 0, 500000 };   // 500 ms tick keeps shutdown responsive
+        if (select(0, &rs, nullptr, nullptr, &tv) <= 0) continue;
+        SOCKET cS = accept(srv, nullptr, nullptr);
+        if (cS == INVALID_SOCKET) continue;
+        char buf[4096];
+        int n = recv(cS, buf, sizeof(buf) - 1, 0);
+        if (n > 0) {
+            std::string req(buf, (size_t)n);
+            std::string c = SpQueryParam(req, "code");
+            if (!c.empty() && SpQueryParam(req, "state") == expectState) {
+                code = c;
+                ok = true;
             }
         }
-        closesocket(srv);
+        const char* resp = ok
+            ? "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+              "<html><body style='font-family:Segoe UI,sans-serif;background:#0b0d0c;"
+              "color:#e8eae8;text-align:center;padding-top:12%'><h2>WaveScope connected</h2>"
+              "<p>You can close this tab and return to the visualizer.</p></body></html>"
+            : "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nWaveScope auth failed.";
+        send(cS, resp, (int)strlen(resp), 0);
+        closesocket(cS);
     }
-    WSACleanup();
     return ok;
 }
 
 // ---- the client ----
+
+// Serializes every write to wavescope.ini (the Spotify worker thread and the
+// UI thread both persist through the profile APIs).
+static SRWLOCK g_iniLock = SRWLOCK_INIT;
 
 struct SpotifyClient {
     std::string clientId = "89df5ee986864e558952ba356aa968ea";
@@ -218,6 +244,8 @@ struct SpotifyClient {
     std::string scopes   = "user-modify-playback-state user-read-playback-state user-read-currently-playing";
     std::string accessToken, refreshToken;
     std::atomic<bool> busy{ false };
+    std::atomic<bool> quitFlag{ false };
+    std::thread worker;
 
     std::wstring IniPath() const { return PmExeDir() + L"wavescope.ini"; }
 
@@ -234,7 +262,9 @@ struct SpotifyClient {
         if (refreshToken.empty()) return;
         std::string blob = Dpapi(refreshToken, true);
         std::wstring hx = SpWiden(SpHex((const BYTE*)blob.data(), blob.size()));
+        AcquireSRWLockExclusive(&g_iniLock);
         WritePrivateProfileStringW(L"spotify", L"refresh", hx.c_str(), IniPath().c_str());
+        ReleaseSRWLockExclusive(&g_iniLock);
     }
     void LoadToken() {
         std::wstring path = IniPath();
@@ -247,7 +277,11 @@ struct SpotifyClient {
         wchar_t cid[128];
         GetPrivateProfileStringW(L"spotify", L"clientId", L"", cid, 128, path.c_str());
         if (cid[0]) clientId = SpNarrow(cid);
-        else WritePrivateProfileStringW(L"spotify", L"clientId", SpWiden(clientId).c_str(), path.c_str());
+        else {
+            AcquireSRWLockExclusive(&g_iniLock);
+            WritePrivateProfileStringW(L"spotify", L"clientId", SpWiden(clientId).c_str(), path.c_str());
+            ReleaseSRWLockExclusive(&g_iniLock);
+        }
     }
 
     void Notify(const std::wstring& m) {
@@ -262,8 +296,8 @@ struct SpotifyClient {
 
     bool RefreshAccess() {
         if (refreshToken.empty()) return false;
-        std::string body = "grant_type=refresh_token&refresh_token=" + refreshToken +
-                           "&client_id=" + clientId;
+        std::string body = "grant_type=refresh_token&refresh_token=" + SpUrlEncode(refreshToken) +
+                           "&client_id=" + SpUrlEncode(clientId);
         SpResp r = SpHttps(L"accounts.spotify.com", L"POST", L"/api/token", body,
                            "application/x-www-form-urlencoded", "");
         if (r.status != 200) return false;
@@ -278,16 +312,34 @@ struct SpotifyClient {
         BYTE hash[32]; SpSha256(verifier, hash);
         std::string challenge = SpBase64Url(hash, 32);
         std::string state = SpRandVerifier().substr(0, 16);
-        std::string url = "https://accounts.spotify.com/authorize?client_id=" + clientId +
+
+        // Listener FIRST, then the browser: an already-consented account can
+        // bounce off /authorize and hit the redirect within milliseconds.
+        WSADATA w;
+        if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false;
+        SOCKET srv = SpListen();
+        if (srv == INVALID_SOCKET) {
+            WSACleanup();
+            if (!quitFlag.load())
+                Notify(L"Couldn't open the sign-in port (127.0.0.1:8888).\n"
+                       L"Another program may be using it. Close it and try again.");
+            return false;
+        }
+
+        std::string url = "https://accounts.spotify.com/authorize?client_id=" + SpUrlEncode(clientId) +
             "&response_type=code&redirect_uri=" + SpUrlEncode(redirect) +
             "&code_challenge_method=S256&code_challenge=" + challenge +
             "&scope=" + SpUrlEncode(scopes) + "&state=" + state;
         ShellExecuteW(nullptr, L"open", SpWiden(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 
         std::string code;
-        if (!SpWaitForCode(code, state)) return false;
-        std::string body = "grant_type=authorization_code&code=" + code +
-            "&redirect_uri=" + SpUrlEncode(redirect) + "&client_id=" + clientId +
+        bool got = SpWaitForCode(srv, code, state, quitFlag);
+        closesocket(srv);
+        WSACleanup();
+        if (!got) return false;
+
+        std::string body = "grant_type=authorization_code&code=" + SpUrlEncode(code) +
+            "&redirect_uri=" + SpUrlEncode(redirect) + "&client_id=" + SpUrlEncode(clientId) +
             "&code_verifier=" + verifier;
         SpResp r = SpHttps(L"accounts.spotify.com", L"POST", L"/api/token", body,
                            "application/x-www-form-urlencoded", "");
@@ -332,15 +384,28 @@ struct SpotifyClient {
     }
 
     void Flow() {
-        if (!EnsureToken()) { Notify(L"Spotify sign-in didn't complete. Try the button again."); return; }
-        StartPlayback(); // notifies on the device/premium cases; silent on success
+        if (!EnsureToken()) {
+            if (!quitFlag.load())
+                Notify(L"Spotify sign-in didn't complete. Try the button again.");
+            return;
+        }
+        if (!quitFlag.load())
+            StartPlayback(); // notifies on the device/premium cases; silent on success
     }
 
     // The one button — runs the whole flow on a worker thread so the render
     // loop never stalls waiting on the browser or the network.
     void OneButton() {
         if (busy.exchange(true)) return;
-        std::thread([this] { Flow(); busy = false; }).detach();
+        if (worker.joinable()) worker.join();   // reap the previous, finished flow
+        worker = std::thread([this] { Flow(); busy = false; });
+    }
+
+    // Joined at app exit so the flow can't run through CRT teardown; the
+    // quit flag wakes the listener's 500 ms select ticks.
+    void Shutdown() {
+        quitFlag = true;
+        if (worker.joinable()) worker.join();
     }
 };
 
