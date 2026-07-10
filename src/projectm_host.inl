@@ -256,14 +256,17 @@ struct ProjectMHost {
         cw = w; ch = h;
     }
 
-    // Render the MilkDrop frame; leaves the context current with no swap, so
-    // the shared UI can be drawn over it via BeginOverlay + a GLPainter.
-    void RenderEngine(const AudioFrame& f) {
+    // Feed ONLY the samples that newly arrived since the last frame, then
+    // render. (Re-sending the full sliding window every frame duplicated the
+    // PCM ~30x and drove projectM's internal beat detection hot and wrong.)
+    void RenderEngine(const float* pcm, int count) {
         if (!ready) return;
         wglMakeCurrent(dc, glrc);
-        unsigned int maxs = projectm_pcm_get_max_samples();
-        unsigned int count = maxs < 2048 ? maxs : 2048;
-        projectm_pcm_add_float(pm, f.wave, count, PROJECTM_MONO);
+        if (pcm && count > 0) {
+            unsigned int maxs = projectm_pcm_get_max_samples();
+            unsigned int c = (unsigned)count < maxs ? (unsigned)count : maxs;
+            projectm_pcm_add_float(pm, pcm, c, PROJECTM_MONO);
+        }
         projectm_opengl_render_frame(pm);
     }
 
