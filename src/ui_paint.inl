@@ -1,10 +1,10 @@
 // One UI, every engine. The HUD, control deck, and help overlay are drawn
 // against this abstract painter so the exact same layout code runs whether the
 // frame underneath came from Direct2D (built-in modes) or OpenGL (projectM /
-// GPU shaders). Two backends implement it: D2DPainter draws into the D2D
-// target; GLPainter (in main.cpp, after the GL headers) draws with legacy GL
-// over the child window. That kills the old "the deck disappears in MilkDrop"
-// split — the controls now live on top of all three engines identically.
+// GPU shaders). D2DPainter is the one backend: the built-in modes draw it
+// straight onto the window target, while the GL engines render the same UI
+// into a WIC bitmap and composite it as a texture over their frame — crisp
+// DirectWrite everywhere, and the controls never vanish on engine switch.
 
 struct UIPainter {
     virtual ~UIPainter() {}

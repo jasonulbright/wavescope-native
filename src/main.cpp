@@ -82,13 +82,6 @@ static D2D1_COLOR_F Hsla(float h, float s, float l, float a) {
     return D2D1::ColorF(r, g, b, a);
 }
 
-// The brand trace palette: ultramarine, position 0..1 -> lightness ramp.
-static D2D1_COLOR_F Trace(float pos, float alpha) {
-    if (pos < 0) pos = 0;
-    if (pos > 1) pos = 1;
-    return Hsla(232.0f, 0.64f, 0.38f + pos * 0.47f, alpha);
-}
-
 // ------------------------------------------------------------------- audio
 
 // One analyzed slice per rendered frame; mirrors the web AudioFrame.
@@ -879,9 +872,13 @@ struct App {
             float pcm[4800];   // up to 100 ms of new samples per frame
             int newN = tap.ReadNew(pmPcmCursor, pcm, 4800, now);
             pmHost.RenderEngine(pcm, newN);
-            pmHost.BeginOverlay();
-            pmHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
-            pmHost.Present();
+            if (pmHost.lost == 0) {
+                pmHost.BeginOverlay();
+                pmHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
+                pmHost.Present();
+            } else if (pmHost.lost > 120) {
+                RebuildEngineHosts();   // GPU reset: contexts are gone for good
+            }
             fpsFrames++;
             if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
             return;
@@ -894,9 +891,13 @@ struct App {
                        tap.SourceName(), shaderHost.ShaderName(shaderIdx), RES_OPTS[resIdx].name, fps);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             shaderHost.RenderEngine(shaderIdx, frame);
-            shaderHost.BeginOverlay();
-            shaderHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
-            shaderHost.Present();
+            if (shaderHost.lost == 0) {
+                shaderHost.BeginOverlay();
+                shaderHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
+                shaderHost.Present();
+            } else if (shaderHost.lost > 120) {
+                RebuildEngineHosts();
+            }
             fpsFrames++;
             if (now - fpsWindowStart >= 1.0f) { fps = fpsFrames; fpsFrames = 0; fpsWindowStart = now; }
             return;
@@ -1443,6 +1444,29 @@ struct App {
             wchar_t path[MAX_PATH];
             if (SHGetPathFromIDListW(pidl, path)) pmHost.SetPresetFolder(path);
             CoTaskMemFree(pidl);
+        }
+    }
+
+    // After a GPU reset both GL contexts are permanently dead: tear the hosts
+    // down and rebuild whichever engine is active (best-effort, once per
+    // ~2 s of sustained failure at 60 fps).
+    void RebuildEngineHosts() {
+        bool wantPm = pmActive, wantShader = shaderActive;
+        pmHost.Destroy();
+        shaderHost.Destroy();
+        RECT rc; GetClientRect(hwnd, &rc);
+        if (wantPm && pmHost.Init(inst, hwnd)) {
+            pmHost.Resize(rc.right, rc.bottom);
+            if (milkMode && !libraryFolder.empty()) pmHost.SetPresetFolder(libraryFolder.c_str());
+            pmHost.Show(true);
+        } else if (wantPm) {
+            pmActive = false;
+        }
+        if (wantShader && shaderHost.Init(inst, hwnd)) {
+            shaderHost.Resize(rc.right, rc.bottom);
+            shaderHost.Show(true);
+        } else if (wantShader) {
+            shaderActive = false;
         }
     }
 
