@@ -77,6 +77,7 @@ floor, e^-6dt decay). Same music, same numbers, both apps.
 | `1 2 3 4` | source: system / mic / demo / file picker |
 | `M` | displays menu (move to a monitor, ALL DISPLAYS companions) |
 | `R` | record clip → `wavescope-<timestamp>.mp4` (H.264 + AAC) |
+| `O` | Spout output — OBS/Resolume ingest the visual as sender "WaveScope" |
 | `B` | Spotify: authorize once + start playback (Premium) |
 | `S` | shuffle timer (off / 15s / 30s / 1m / 5m / **DJ**) |
 | `C` | calm mode (photosensitive-safe: no burst modes, softened beat) |
@@ -97,6 +98,19 @@ captures the engine's render target *before* the UI, at the current render
 resolution (built-ins) or window size (GL engines). Switching engine or
 resolution mid-take finalizes the file cleanly. `● REC mm:ss` shows in the
 HUD.
+
+## OBS / Spout
+
+`O` publishes the pre-UI visual as a Spout shared texture named
+**WaveScope** — in OBS add a *Spout2 Capture* source (obs-spout2-plugin)
+and pick it; Resolume/TouchDesigner see it the same way. This is the
+desktop analog of the web app's `?embed=1` browser source, without the
+browser. The state persists across launches. Implementation is the
+vendored, pinned Spout SDK subset in `third_party/spout` (BSD-2-Clause;
+see `PIN.md` there) — the frame feed reuses the recorder's capture path,
+so the readback cost is only paid while the output is on. `selftest`
+verifies the sender end-to-end with an in-process Spout receiver doing a
+pixel roundtrip.
 
 ## Displays
 
@@ -151,6 +165,7 @@ minimize hides to tray (and rendering fully stops while hidden).
 - `src/spotify.inl` — PKCE flow, loopback listener, WinHTTP, DPAPI tokens,
   now-playing poller.
 - `src/record.inl` — MP4 clip recorder (Media Foundation SinkWriter).
+- `src/spout_out.inl` — Spout output wrapper (`third_party/spout`).
 - `src/ui_paint.inl` — the abstract UI painter (one UI, every engine).
 - `src/selftest.inl` — the `selftest` harness.
 - `src/tests.cpp` — unit tests for the pure math (run by `build.bat`).
@@ -159,10 +174,11 @@ minimize hides to tray (and rendering fully stops while hidden).
 
 See `DEPENDENCIES.md` for the full decision table. Short version: OS
 facilities everywhere they exist (WinHTTP, DPAPI, bcrypt, Media Foundation,
-WASAPI, D2D/DirectWrite/WIC, WGL), one vendored dependency (libprojectM
-4.x, LGPL-2.1, pinned, built from `C:\projects\projectm`), and small
-hand-rolled code only where it is boring and testable (ini, flat JSON
-reads, base64url) — with the FFT and analysis pinned by unit tests.
+WASAPI, D2D/DirectWrite/WIC, WGL), two vendored dependencies (libprojectM
+4.x, LGPL-2.1, pinned, built from `C:\projects\projectm`; the Spout SDK's
+DX subset, BSD-2-Clause, pinned in-tree), and small hand-rolled code only
+where it is boring and testable (ini, flat JSON reads, base64url) — with
+the FFT and analysis pinned by unit tests.
 
 `FINDINGS.md` records the adversarial review this codebase went through;
 `PARITY.md` tracks the feature matrix against the web app;

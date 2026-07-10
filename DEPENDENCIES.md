@@ -25,7 +25,7 @@ boring), **fixed** (kept hand-rolled, defects repaired in place), **OS-native**
 | ini persistence | Get/WritePrivateProfileString | OS-native, fixed | Boring and bounded; added a write mutex (worker vs UI thread). |
 | Tray / registry / dialogs | shell32, advapi32, comdlg32 | OS-native, keep | |
 | GL bitmap font (`wglUseFontBitmaps`) | dead code from the pre-overlay HUD | removed | The D2D overlay texture replaced it. |
-| **Spout2** (OBS texture sharing) | third-party | NOT ADDED | Brief requires explicit owner approval first. Open question in the handoff. |
+| **Spout2 SDK, DX subset** | vendored source (`third_party/spout`), BSD-2-Clause, tag 2.007.017 (commit f49e2f4) | vendored, pinned | Owner-approved. The Spout share protocol (shared-memory sender registry + shared DX11 texture + access mutex + frame semaphore) is an ecosystem convention, not a documented standard — hand-rolling it risks silent receiver incompatibility, the exact case where vendoring wins. Sender + receiver classes compile in (~7 files); receiver is used by selftest for a true roundtrip. Audit surface: named shared memory + D3D11, active only while `O` output is on; no network, no untrusted parsing. See `third_party/spout/PIN.md`. |
 | Monospace UI font | system Consolas | keep | No font embedding → no license question; matches the instrument aesthetic. |
 
 ## The honest tradeoff assessment

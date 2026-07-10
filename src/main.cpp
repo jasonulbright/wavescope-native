@@ -467,6 +467,7 @@ private:
 #include "shader_host.inl"
 #include "spotify.inl"
 #include "record.inl"
+#include "spout_out.inl"
 
 // --------------------------------------------------------------------- app
 
@@ -517,7 +518,8 @@ struct App {
     bool pmActive = false;
     AudioTap::TapCursor pmCursor;   // read position into the tap for the PCM feed
     Recorder rec;
-    std::vector<uint8_t> recScratch;         // GL readback for the recorder
+    SpoutOut spout;                          // O: shared-texture output (OBS)
+    std::vector<uint8_t> recScratch;         // GL readback for recorder/Spout
     IWICBitmap* recBmp = nullptr;            // built-in engine records through a
     ID2D1RenderTarget* recRT = nullptr;      // WIC (CPU) offscreen: same draws,
     ID2D1SolidColorBrush* recBrush = nullptr;// lockable pixels
@@ -571,6 +573,7 @@ struct App {
     bool alwaysOnTop = false;
     WINDOWPLACEMENT savedPlacement = { sizeof(WINDOWPLACEMENT) };
     int savedEngine = 0;         // persisted engine (0 wave, 1 gpu, 2 projm, 3 milk)
+    bool savedSpout = false;     // persisted Spout-output state
     RECT restoreRect = {};       // persisted window placement
     bool haveRestore = false, restoreMax = false;
     LARGE_INTEGER qpcFreq = {}, qpcStart = {};
@@ -736,7 +739,11 @@ struct App {
     // at its current size (offscreen resolution for built-ins, client pixels
     // for the GL engines) plus the analysed audio.
     void ToggleRecord() {
-        if (rec.Active()) { rec.Stop(); ReleaseRecOffscreen(); return; }
+        if (rec.Active()) {
+            rec.Stop();
+            if (!spout.on) ReleaseRecOffscreen();   // Spout may still need it
+            return;
+        }
         RECT rc; GetClientRect(hwnd, &rc);
         int w = rc.right, h = rc.bottom;
         if (!pmActive && !shaderActive) {
@@ -745,6 +752,23 @@ struct App {
         }
         if (!rec.Start(w, h, g_tap.SampleRate(), &g_tap))
             SetWindowTextW(hwnd, L"WaveScope  (recording failed to start)");
+    }
+
+    // O: publish the visual as a Spout shared texture (OBS ingests it as a
+    // "Spout2 Capture" source). One sender per process, owned by the
+    // primary window.
+    void ToggleSpout() {
+        if (isCompanion) return;
+        if (spout.on) {
+            spout.Stop();
+            if (!rec.Active()) ReleaseRecOffscreen();
+            SaveConfig();
+            return;
+        }
+        if (!spout.Start())
+            SetWindowTextW(hwnd, L"WaveScope  (Spout output failed to start)");
+        else
+            SaveConfig();
     }
 
     // The offscreen target the modes draw into, sized to the resolution
@@ -848,8 +872,10 @@ struct App {
                 off += _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\n\x266A %s", np.c_str());
             if (rec.Active()) {
                 int s = (int)rec.Seconds();
-                _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\n\x25CF REC %02d:%02d", s / 60, s % 60);
+                off += _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\n\x25CF REC %02d:%02d", s / 60, s % 60);
             }
+            if (spout.on)
+                _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\nSPOUT OUT");
         }
 
         if (pmActive && pmHost.ready) {
@@ -864,10 +890,12 @@ struct App {
             int newN = g_tap.ReadNew(pmCursor, pcm, 4800);
             pmHost.RenderEngine(pcm, newN);
             if (pmHost.lost == 0) {
-                if (rec.Active()) {   // pre-UI frame for the clip
+                if (rec.Active() || spout.on) {   // pre-UI frame, read once
                     int rw = 0, rh = 0;
-                    if (pmHost.ReadBack(recScratch, rw, rh))
-                        rec.PushVideo(recScratch.data(), rw, rh);
+                    if (pmHost.ReadBack(recScratch, rw, rh)) {
+                        if (rec.Active()) rec.PushVideo(recScratch.data(), rw, rh);
+                        spout.Send(recScratch.data(), rw, rh, true);
+                    }
                 }
                 pmHost.BeginOverlay();
                 pmHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
@@ -888,10 +916,12 @@ struct App {
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             shaderHost.RenderEngine(shaderIdx, frame);
             if (shaderHost.lost == 0) {
-                if (rec.Active()) {   // pre-UI frame for the clip
+                if (rec.Active() || spout.on) {   // pre-UI frame, read once
                     int rw = 0, rh = 0;
-                    if (shaderHost.ReadBack(recScratch, rw, rh))
-                        rec.PushVideo(recScratch.data(), rw, rh);
+                    if (shaderHost.ReadBack(recScratch, rw, rh)) {
+                        if (rec.Active()) rec.PushVideo(recScratch.data(), rw, rh);
+                        spout.Send(recScratch.data(), rw, rh, true);
+                    }
                 }
                 shaderHost.BeginOverlay();
                 shaderHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
@@ -909,11 +939,11 @@ struct App {
         RECT rc; GetClientRect(hwnd, &rc);
         EnsureOffscreen(rc.right, rc.bottom);
 
-        bool recording = rec.Active() && EnsureRecOffscreen();
+        bool recording = (rec.Active() || spout.on) && EnsureRecOffscreen();
         if (recording) {
-            // While recording, the modes draw into a WIC (CPU) offscreen of
-            // the same size: identical calls, retained trails, lockable
-            // pixels for the encoder. One draw per frame — mode state
+            // While recording (or streaming to Spout), the modes draw into a
+            // WIC (CPU) offscreen of the same size: identical calls, retained
+            // trails, lockable pixels. One draw per frame — mode state
             // advances exactly once.
             recRT->BeginDraw();
             recBrush->SetColor(D2D1::ColorF(0.043f, 0.051f, 0.047f, mode.fade));
@@ -927,7 +957,8 @@ struct App {
             if (SUCCEEDED(recBmp->Lock(&wrc, WICBitmapLockRead, &lock))) {
                 UINT cb = 0; BYTE* data = nullptr;
                 lock->GetDataPointer(&cb, &data);
-                rec.PushVideo(data, (int)recW, (int)recH, true);   // top-down
+                if (rec.Active()) rec.PushVideo(data, (int)recW, (int)recH, true); // top-down
+                spout.Send(data, (int)recW, (int)recH, false);
                 lock->Release();
             }
         } else {
@@ -1464,6 +1495,7 @@ struct App {
             L"4              open an audio file\n"
             L"M              displays (pick a monitor)\n"
             L"R              record clip -> wavescope-<time>.mp4 (H.264+AAC)\n"
+            L"O              Spout output (OBS ingests \"WaveScope\")\n"
             L"B              Spotify: authorize + start playback (Premium)\n"
             L"S              shuffle timer (off / 15s / 30s / 1m / 5m / DJ)\n"
             L"C              calm mode (photosensitive-safe)\n"
@@ -1474,7 +1506,7 @@ struct App {
             L"\n"
             L"Launch: WaveScope.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
             L"        [install-startup | remove-startup]   \x2014   tray icon: right-click";
-        float w = 620, h = 486;
+        float w = 620, h = 505;
         float x = (p.W() - w) * 0.5f, y = (p.H() - h) * 0.5f;
         if (x < 0) x = 0; if (y < 0) y = 0;
         p.Rect(x, y, w, h, 0.03f, 0.04f, 0.04f, 0.92f, true);
@@ -1868,6 +1900,7 @@ struct App {
         wi(L"shuffle", shuffleIdx); wi(L"calm", calm ? 1 : 0); wi(L"shader", shaderIdx);
         wi(L"shufflePal", shufflePalettes ? 1 : 0);
         wi(L"engine", pmActive ? (milkMode ? 3 : 2) : (shaderActive ? 1 : 0));
+        wi(L"spout", spout.on ? 1 : 0);
         WritePrivateProfileStringW(L"settings", L"milkFolder", libraryFolder.c_str(), path.c_str());
         // Window placement: the pre-fullscreen placement when fullscreen.
         // Skipped once the window is destroyed (the WM_CLOSE-time save wrote
@@ -1942,6 +1975,7 @@ struct App {
         shaderIdx = Clampi(GetPrivateProfileIntW(L"settings", L"shader", 0, path.c_str()), 0, SV_COUNT - 1);
         shufflePalettes = GetPrivateProfileIntW(L"settings", L"shufflePal", 0, path.c_str()) != 0;
         savedEngine = Clampi(GetPrivateProfileIntW(L"settings", L"engine", 0, path.c_str()), 0, 3);
+        savedSpout = GetPrivateProfileIntW(L"settings", L"spout", 0, path.c_str()) != 0;
         wchar_t mf[MAX_PATH];
         GetPrivateProfileStringW(L"settings", L"milkFolder", L"", mf, MAX_PATH, path.c_str());
         libraryFolder = mf;
@@ -1964,6 +1998,7 @@ struct App {
     // global and outlives the windows.
     void Shutdown() {
         rec.Stop();
+        spout.Stop();
         ReleaseRecOffscreen();
         shaderHost.Destroy();
         pmHost.Destroy();
@@ -2130,6 +2165,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'G':      a->ToggleShader(); break;      // jump straight to GPU
         case 'R':      a->ToggleRecord(); break;      // web parity: R = record
         case 'T':      a->SetAlwaysOnTop(!a->alwaysOnTop); break;
+        case 'O':      a->ToggleSpout(); break;       // Spout output (OBS)
         case 'B':      g_spotify.OneButton(); break;  // Spotify: authorize + play
         case 'F':      a->ToggleFullscreen(); break;
         case 'H':      a->hud = !a->hud; break;
@@ -2367,6 +2403,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         case 2: v->EnterProjectM(false); break;
         case 3: v->EnterProjectM(true); break;
         }
+        if (v->savedSpout) v->ToggleSpout();
     }
 
     if (opts.selftest) {
