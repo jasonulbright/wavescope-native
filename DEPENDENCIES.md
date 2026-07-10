@@ -9,7 +9,7 @@ boring), **fixed** (kept hand-rolled, defects repaired in place), **OS-native**
 
 | Component | Implementation | Verdict | Reasoning / audit surface |
 |---|---|---|---|
-| TLS + HTTP (Spotify token & API) | WinHTTP (schannel) | OS-native, keep | Exactly what the security bar demands; no hand-rolled TLS anywhere. Cert validation at OS defaults, never relaxed. |
+| TLS + HTTP (Spotify token & API) | WinHTTP (schannel) | OS-native, keep | Exactly what the security bar demands; no hand-rolled TLS anywhere. Cert validation at OS defaults, never relaxed; redirects never followed (a bearer must not travel cross-host). |
 | Secrets at rest (refresh token) | DPAPI `CryptProtectData` | OS-native, keep | User-bound, zero deps. Already in place before this review. |
 | SHA-256 + RNG (PKCE) | bcrypt.dll (CNG) | OS-native, keep | No hand-rolled crypto. |
 | base64url / hex / URL-encode | ~40 lines hand-rolled | keep | Small, total, bounded; unit-testable. |

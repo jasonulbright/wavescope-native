@@ -5,6 +5,11 @@ shader_host.inl, spotify.inl, ui_paint.inl) against the web engine at
 `C:\projects\wavescope` and the parity contract. Severity-ranked; each entry
 has the failure scenario that makes it real. Status column tracks the fix.
 
+Two passes: the original review (sections below), then a **second
+independent pass (2026-07-10)** over the post-review codebase — every line
+re-read, the app rebuilt, run, and probed live. Its findings are in the
+"Second pass" section at the end; everything above it re-verified as fixed.
+
 ## Policy (sanitize)
 
 | # | Sev | Where | Finding / failure scenario | Status |
@@ -72,3 +77,61 @@ has the failure scenario that makes it real. Status column tracks the fix.
 | U8 | projectm_host.inl:173 | Preset scan order is filesystem-dependent; sort for stable cycling. | fixed |
 | U9 | README.md | Overstates ("zero runtime dependencies" vs. the projectM DLLs + VC runtime), stale key list. | rewritten |
 | U10 | main.cpp:84, hosts | Dead code: `Trace()`, GL bitmap-font display lists (`fontBase`, `wglUseFontBitmaps`) left from the removed GL HUD painter, stale GLPainter comment. | removed |
+
+## Second pass (2026-07-10, post-review verification)
+
+Method: full re-read of all 11 source files, build, unit tests, `selftest`,
+plus live probes (engine restore, 8K recording, deck wrap at narrow widths,
+ini before/after runs, `git log --all` sweeps). Findings ranked; status
+tracks this pass's fixes.
+
+### Policy (sanitize)
+
+| # | Sev | Where | Finding / failure scenario | Status |
+|---|-----|-------|----------------------------|--------|
+| Z3 | HIGH | git history | Z2's "verified clean" checked **messages only**. (a) 10 commits on `main` — already force-pushed to the public GitHub remote — carry an AI-vendor **author/committer identity**; `git log --format=%an` leaks it. (b) `refs/original/refs/heads/master` (the history-rewrite backup ref) still holds the entire pre-rewrite history, trailers included: `git log --all` shows everything the rewrite was meant to remove. | **OWNER ACTION** — history rewrites are yours to run. One-time, from the repo root: see "Z3 remediation" below. |
+
+**Z3 remediation (run once, owner):**
+
+```
+git filter-branch -f --env-filter "
+if test \"$GIT_AUTHOR_EMAIL\" = claude@anthropic.com; then
+  GIT_AUTHOR_NAME='Jason Ulbright'; GIT_AUTHOR_EMAIL=jason.ulbright@gmail.com
+  export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
+fi
+if test \"$GIT_COMMITTER_EMAIL\" = claude@anthropic.com; then
+  GIT_COMMITTER_NAME='Jason Ulbright'; GIT_COMMITTER_EMAIL=jason.ulbright@gmail.com
+  export GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+fi" -- main
+git update-ref -d refs/original/refs/heads/master
+git update-ref -d refs/original/refs/heads/main 2>nul
+git reflog expire --expire=now --all
+git gc --prune=now
+git update-ref refs/remotes/origin/main main
+git push --force origin main
+```
+
+Verify afterwards: `git log --all --format="%an %ae %cn %ce %s %b" | findstr /i "claude anthropic co-authored"` must print nothing. (Run it in Git Bash with `grep -ci` if you prefer.) Note the pre-rewrite `wavescope-native.7z` backup also contains the old history — keep it private or delete it.
+
+### Crashes / correctness
+
+| # | Sev | Where | Finding / failure scenario | Status |
+|---|-----|-------|----------------------------|--------|
+| N1 | MED | main.cpp ToggleSpout/selftest | `selftest` silently rewrites the user's persisted settings: the Spout leg calls `ToggleSpout()` → `SaveConfig()` with the test's transient state. Observed live: owner's `engine=2` (projectM) clobbered to `0` by one selftest run — next launch boots the wrong engine. Any settings write during selftest has this problem. Fix: selftest runs with persistence suppressed. | fixed |
+| N2 | MED | record.inl Start / main.cpp ToggleRecord | Recording at the 8K render target always fails ("recording failed to start"): H.264 encoders cap near 4096 px wide, and 7680x4320 BGRA also queues ~1 GB at depth 8. Verified live at 8K. Fix: clamp the recording surface to 4K height (built-ins render through it while recording; on-screen look unchanged — it scales to the window either way). | fixed |
+| N3 | LOW | main.cpp:1629,1650 | Stale engine window titles: "projectM (M to exit, ...)" / "GPU shader (G to exit, ...)". M has been the displays menu since the key realignment — the title teaches a wrong key. | fixed |
+| N4 | LOW | main.cpp RenderFrame `extra[]` | HUD extras accumulate with `off += _snwprintf_s(..., _TRUNCATE, ...)`; on truncation that returns −1 and the size_t offset wraps → the **next** append writes through a wild pointer. Unreachable today only because now-playing is capped at 60 chars (worst case ≈93/220); one cap change away from memory corruption. Harden the accumulation. | fixed |
+| N5 | LOW | projectm_host.inl / shader_host.inl Init | Init failure paths (`SetPixelFormat`, context creation, `projectm_create`) return false leaving the child window/DC/context alive; each retry of G / engine buttons leaks another set. Fix: tear down on failure. | fixed |
+| N6 | LOW | spotify.inl StartPlayback/Notify | Worker-thread `MessageBoxW` with no owner: quit while a notice is up and `Shutdown()`'s join waits on the dialog — app lingers until someone clicks OK. Also `StartPlayback` notifies even mid-shutdown. Fix: skip notices once `quitFlag` is set. | fixed |
+| N7 | INFO | spotify.inl SpHttps | WinHTTP's default redirect policy would resend the bearer on a cross-host redirect. Spotify's API doesn't redirect cross-host, and TLS + host pinning bound the risk; hardened anyway: every WinHTTP call (token + API) now uses `WINHTTP_OPTION_REDIRECT_POLICY_NEVER` — an unexpected redirect fails loud instead of leaking a bearer. | fixed |
+
+### Parity deviations found live (deck/HUD vs. the web console)
+
+| # | Sev | Where | Finding | Status |
+|---|-----|-------|---------|--------|
+| D1 | MED | main.cpp deck | The right cluster is missing the web's `rec (R)` button — recording exists but is undiscoverable (hotkey-only, documented nowhere on screen). | fixed |
+| D2 | LOW | main.cpp deck | Picker group label reads MODE always; web switches it to PRESET when a preset engine is active. | fixed |
+| D3 | LOW | main.cpp deck | TRACE / calm / palettes+shuffle stay visible under GPU/projectM where trace palettes don't apply; the web hides them there (keys keep working). | fixed |
+| D4 | LOW | projectm_host.inl | PROJM's first preset is alphabetical: `102-per_frame3.milk` — a test fixture. Web defaults to WaveScope Tunnel and sorts the Test presets last. | fixed |
+| D5 | LOW | main.cpp HUD | HUD RES line shows the target label (AUTO/4K); web shows the real backing pixels. Misleading for the GL engines, which render at window size regardless of target. Now shows actual pixels, like the web. | fixed |
+| D6 | INFO | shader/projectm hosts | The GL engines ignore the render-resolution target (window-size render); the web renders GPU/projectM at the target for supersampling. Real-world impact is low (fullscreen = native monitor res) and an FBO indirection isn't free; documented as a deliberate deviation in PARITY.md instead of built. | documented |

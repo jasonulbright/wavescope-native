@@ -44,7 +44,8 @@ re-opens/decodes it, does a Spout roundtrip through an in-process receiver,
 sweeps a spread of the 551 classic presets through the ns-eel parser, dumps
 PNGs of what actually rendered beside the exe, writes
 `wavescope-selftest.log`, and exits nonzero on any failure. Run it after
-every change; CI-in-a-flag.
+every change; CI-in-a-flag. Selftest never writes `wavescope.ini` — your
+engine/mode/palette survive it.
 
 ## The three engines
 
@@ -92,17 +93,24 @@ floor, e^-6dt decay). Same music, same numbers, both apps.
 | `ESC` | close panel / menu / help / fullscreen, then quit |
 
 Resolution targets (AUTO / 1080 / 1440 / 4K / 8K) live in the deck's
-`RES ▾` dropdown. The deck reveals when the mouse nears the bottom edge and
-hides after 3 s idle. DJ shuffle hops engine AND visual every 30 s.
+`RES ▾` dropdown; they drive the built-in modes' offscreen render. The GL
+engines (GPU / projectM) always render at window size — fullscreen is
+already native resolution — and the HUD's RES line reports the pixels
+actually rendered either way. The deck reveals when the mouse nears the
+bottom edge and hides after 3 s idle; under GPU/projectM the trace-palette
+controls hide (they color the built-in modes), web-style. DJ shuffle hops
+engine AND visual every 30 s.
 
 ## Recording
 
-`R` starts/stops an MP4 beside the exe: hardware H.264 where available plus
-AAC of the analysed audio, via Media Foundation (no new dependencies). It
-captures the engine's render target *before* the UI, at the current render
-resolution (built-ins) or window size (GL engines). Switching engine or
-resolution mid-take finalizes the file cleanly. `● REC mm:ss` shows in the
-HUD.
+`R` (or the deck's `rec (R)` button) starts/stops an MP4 beside the exe:
+hardware H.264 where available plus AAC of the analysed audio, via Media
+Foundation (no new dependencies). It captures the engine's render target
+*before* the UI, at the current render resolution (built-ins) or window
+size (GL engines), clamped to 4K — H.264 encoders stop near 4096 px a
+side, so an 8K-target take lands as a 3840-wide file instead of failing.
+Switching engine or resolution mid-take finalizes the file cleanly.
+`● REC mm:ss` shows in the HUD.
 
 ## OBS / Spout
 
