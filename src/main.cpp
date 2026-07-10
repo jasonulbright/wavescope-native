@@ -1587,6 +1587,7 @@ struct App {
 
     void SaveConfig() {
         std::wstring path = ConfigPath();
+        AcquireSRWLockExclusive(&g_iniLock);   // vs. the Spotify worker's SaveToken
         auto wi = [&](const wchar_t* k, int v) {
             wchar_t b[16]; _itow_s(v, b, 10);
             WritePrivateProfileStringW(L"settings", k, b, path.c_str());
@@ -1613,6 +1614,7 @@ struct App {
             wchar_t key[16]; swprintf_s(key, L"p%d", (int)i);
             WritePrivateProfileStringW(L"palettes", key, val.c_str(), path.c_str());
         }
+        ReleaseSRWLockExclusive(&g_iniLock);
     }
 
     void LoadConfig() {
@@ -1988,6 +1990,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         UpdateCursorHide(g_views[0]->Now());
     }
 done:
+    g_spotify.Shutdown(); // join the OAuth worker before statics tear down
     if (!g_views.empty()) g_views[0]->SaveConfig(); // primary window's setup persists
     if (g_cursorHidden) { while (ShowCursor(TRUE) < 0) {} g_cursorHidden = false; }
     TrayRemove();
