@@ -636,6 +636,8 @@ struct App {
     ID2D1BitmapRenderTarget* offscreen = nullptr;
     ID2D1SolidColorBrush* offBrush = nullptr;
     UINT offW = 0, offH = 0;
+    VizState viz;           // per-window mode state (pools, history, peaks)
+    BlitCache blitCache;    // cached CPU-blit bitmap, tied to `offscreen`
     // UI overlay rendered with D2D into a WIC bitmap, then composited as a GL
     // texture over the projectM/shader engines so the UI is identical (crisp
     // DirectWrite) in every engine, not an aliased GL bitmap font.
@@ -783,6 +785,7 @@ struct App {
     }
 
     void ReleaseOffscreen() {
+        blitCache.Release();   // its bitmap was created on `offscreen`
         SafeRelease(&offBrush);
         SafeRelease(&offscreen);
         offW = offH = 0;
@@ -910,7 +913,8 @@ struct App {
         offscreen->BeginDraw();
         offBrush->SetColor(D2D1::ColorF(0.043f, 0.051f, 0.047f, mode.fade));
         offscreen->FillRectangle(D2D1::RectF(0, 0, (float)offW, (float)offH), offBrush);
-        DrawCtx g{ offscreen, d2d, offBrush, PaletteFn(), (float)offW, (float)offH, &frame };
+        DrawCtx g{ offscreen, d2d, offBrush, PaletteFn(), (float)offW, (float)offH,
+                   &frame, &viz, &blitCache };
         mode.draw(g);
         offscreen->EndDraw();
 

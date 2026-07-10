@@ -3,9 +3,9 @@
 // translate nearly line-for-line). Included by main.cpp as one translation
 // unit; relies on AudioFrame, Hsla, PI, TAU, BinLog defined there/below.
 //
-// Single-instance app, so per-mode persistent state lives in function-local
-// statics (particle pools, history buffers, peak arrays), mirroring the web's
-// per-instance `state` object.
+// Per-mode persistent state (particle pools, history buffers, peak arrays)
+// lives in VizState — one instance per window — mirroring the web's
+// per-instance `state` object. Companion windows must never share pools.
 
 #include <vector>
 
@@ -87,7 +87,54 @@ static const Palette PALETTES[] = {
 };
 static const int PAL_COUNT = (int)(sizeof(PALETTES) / sizeof(PALETTES[0]));
 
+// ----------------------------------------------------------- per-view state
+
+struct Particle { float x, y, vx, vy, life, hue, size; };
+struct Shard { float a, d, vd, rot, vr, size, life, hue; };
+struct PulseRing { float x, y, r, life, hue; };
+
+// Everything any mode remembers between frames, one instance per window.
+struct VizState {
+    // spectrum
+    float barsSmooth[96] = {};
+    float mirrorBands[128] = {};
+    float radialSmooth[96] = {};
+    float ladderBands[48] = {}, ladderPeaks[48] = {};
+    float ribbonBands[128] = {};
+    float skylineBands[20] = {};
+    std::vector<uint8_t> waterfall;          // 512*288*4, allocated on first use
+    float dualArcBands[64] = {};
+    float dotBands[48] = {};
+    // waveform
+    float ridgeHist[36][160] = {};
+    int ridgeCount = 0;
+    // particles
+    std::vector<Particle> nebula, fountain, starfield, swarm, flow;
+    int fountainCursor = 0;
+    // geometry
+    float tunnelRings[5] = { 0.1f, 0.3f, 0.5f, 0.7f, 0.9f };
+    std::vector<Shard> shards;
+    float latticeBands[12] = {};
+    // field
+    std::vector<uint8_t> plasma;             // 160*90*4
+    uint8_t plasmaLut[256 * 3] = {};
+    void* plasmaLutPal = nullptr;
+    std::vector<PulseRing> rings;
+    bool ringsWasBeat = false;
+    float rainDrops[72] = {};
+    int rainCols = 0;
+};
+
 // --------------------------------------------------------------- DrawCtx
+
+// Cached bitmap for CPU-buffer blits (plasma, waterfall): creating a D2D
+// bitmap per frame was measurable churn; CopyFromMemory into a cached one is
+// the cheap path. Owned by the window (tied to the offscreen target's life).
+struct BlitCache {
+    ID2D1Bitmap* bmp = nullptr;
+    UINT w = 0, h = 0;
+    void Release() { if (bmp) { bmp->Release(); bmp = nullptr; } w = h = 0; }
+};
 
 struct DrawCtx {
     ID2D1RenderTarget* rt;   // window or offscreen target (base interface)
@@ -96,6 +143,8 @@ struct DrawCtx {
     D2D1_COLOR_F (*pal)(float, float);
     float w, h;
     const AudioFrame* f;
+    VizState* st;
+    BlitCache* blit;
 
     void SetColor(float pos, float alpha) { brush->SetColor(pal(pos, alpha)); }
     void RawColor(D2D1_COLOR_F c) { brush->SetColor(c); }
@@ -139,13 +188,28 @@ struct DrawCtx {
     }
     // Draw a CPU BGRA buffer scaled to the whole target (plasma, waterfall).
     void Blit(const uint8_t* bgra, UINT bw, UINT bh) {
-        ID2D1Bitmap* bmp = nullptr;
-        D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96, 96);
-        if (FAILED(rt->CreateBitmap(D2D1::SizeU(bw, bh), bgra, bw * 4, props, &bmp))) return;
+        if (blit && blit->bmp && (blit->w != bw || blit->h != bh)) blit->Release();
+        if (blit && !blit->bmp) {
+            D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96, 96);
+            if (SUCCEEDED(rt->CreateBitmap(D2D1::SizeU(bw, bh), props, &blit->bmp))) {
+                blit->w = bw; blit->h = bh;
+            }
+        }
+        ID2D1Bitmap* bmp = blit ? blit->bmp : nullptr;
+        bool owned = false;
+        if (!bmp) {
+            D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96, 96);
+            if (FAILED(rt->CreateBitmap(D2D1::SizeU(bw, bh), bgra, bw * 4, props, &bmp))) return;
+            owned = true;
+        } else {
+            D2D1_RECT_U all = { 0, 0, bw, bh };
+            bmp->CopyFromMemory(&all, bgra, bw * 4);
+        }
         rt->DrawBitmap(bmp, D2D1::RectF(0, 0, w, h), 1.0f,
                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-        bmp->Release();
+        if (owned) bmp->Release();
     }
 };
 
@@ -156,8 +220,6 @@ struct Mode {
     bool flash;  // beat-burst mode; excluded by calm mode (default false)
 };
 
-struct Particle { float x, y, vx, vy, life, hue, size; };
-
 // ===================================================================
 // SPECTRUM family
 // ===================================================================
@@ -165,7 +227,7 @@ struct Particle { float x, y, vx, vy, life, hue, size; };
 static void DrawBars(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     int n = (int)(g.w / 28.0f); if (n < 24) n = 24; if (n > 96) n = 96;
-    static float smooth[96] = {};
+    float* smooth = g.st->barsSmooth;
     float gap = g.w / n / 6.0f, bw = g.w / n - gap;
     for (int i = 0; i < n; i++) {
         float target = BinLog(f, (float)i / (n - 1));
@@ -179,7 +241,7 @@ static void DrawBars(DrawCtx& g) {
 static void DrawMirrorBars(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     int n = (int)(g.w / 20.0f); if (n < 32) n = 32; if (n > 128) n = 128;
-    static float b[128] = {}; Bands(f, b, n, 0.35f);
+    float* b = g.st->mirrorBands; Bands(f, b, n, 0.35f);
     float bw = g.w / n;
     for (int i = 0; i < n; i++) {
         float bh = powf(b[i] * g.h * 0.45f, 1.02f);
@@ -191,7 +253,7 @@ static void DrawMirrorBars(DrawCtx& g) {
 static void DrawRadial(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int n = 96;
-    static float smooth[n] = {};
+    float* smooth = g.st->radialSmooth;
     float cx = g.w / 2, cy = g.h / 2, mn = g.w < g.h ? g.w : g.h;
     float r0 = mn * (0.18f + f.bass * 0.05f), rot = f.t * 0.15f;
     float lw = TAU * r0 / n / 2.4f; if (lw < 2) lw = 2;
@@ -208,7 +270,8 @@ static void DrawRadial(DrawCtx& g) {
 static void DrawPeakLadder(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int n = 48;
-    static float b[n] = {}, peaks[n] = {};
+    float* b = g.st->ladderBands;
+    float* peaks = g.st->ladderPeaks;
     Bands(f, b, n, 0.35f);
     float bw = g.w / n, seg = g.h / 48.0f; if (seg < 6) seg = 6;
     for (int i = 0; i < n; i++) {
@@ -227,7 +290,7 @@ static void DrawPeakLadder(DrawCtx& g) {
 static void DrawRibbon(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int n = 128;
-    static float b[n] = {}; Bands(f, b, n, 0.5f);
+    float* b = g.st->ribbonBands; Bands(f, b, n, 0.5f);
     for (int layer = 2; layer >= 0; layer--) {
         float scale = 0.9f - layer * 0.22f;
         D2D1_POINT_2F pts[n + 2];
@@ -243,7 +306,7 @@ static void DrawRibbon(DrawCtx& g) {
 static void DrawSkyline(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int n = 20;
-    static float b[n] = {}; Bands(f, b, n, 0.55f);
+    float* b = g.st->skylineBands; Bands(f, b, n, 0.55f);
     float bw = g.w / n;
     for (int i = 0; i < n; i++) {
         float bh = b[i] * g.h * 0.8f, x = i * bw;
@@ -263,7 +326,8 @@ static void DrawSkyline(DrawCtx& g) {
 static void DrawWaterfall(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const UINT W = 512, H = 288;
-    static uint8_t buf[W * H * 4] = {};
+    if (g.st->waterfall.size() != (size_t)W * H * 4) g.st->waterfall.assign((size_t)W * H * 4, 0);
+    uint8_t* buf = g.st->waterfall.data();
     // Scroll down one row.
     memmove(buf + W * 4, buf, W * 4 * (H - 1));
     for (UINT i = 0; i < W; i++) {
@@ -280,7 +344,7 @@ static void DrawWaterfall(DrawCtx& g) {
 static void DrawDualArc(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int n = 64;
-    static float b[n] = {}; Bands(f, b, n, 0.35f);
+    float* b = g.st->dualArcBands; Bands(f, b, n, 0.35f);
     float cx = g.w / 2, cy = g.h * 0.55f, mn = g.w < g.h ? g.w : g.h, R = mn * 0.42f;
     float lw = R / 90.0f; if (lw < 2) lw = 2;
     for (int i = 0; i < n; i++) {
@@ -297,7 +361,7 @@ static void DrawDualArc(DrawCtx& g) {
 static void DrawDotMatrix(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int cols = 48, rows = 24;
-    static float b[cols] = {}; Bands(f, b, cols, 0.35f);
+    float* b = g.st->dotBands; Bands(f, b, cols, 0.35f);
     float cw = g.w / cols, rh = g.h / rows, r = (cw < rh ? cw : rh) * 0.28f;
     for (int i = 0; i < cols; i++) {
         int lit = (int)(b[i] * rows + 0.5f);
@@ -342,7 +406,7 @@ static void DrawLissajous(DrawCtx& g) {
     float cx = g.w / 2, cy = g.h / 2, mn = g.w < g.h ? g.w : g.h, S = mn * 0.42f;
     const int delay = 180; float lw = S / 260.0f; if (lw < 1.5f) lw = 1.5f;
     g.SetColor(0.85f, 0.8f);
-    static D2D1_POINT_2F pts[1100]; int m = 0;
+    D2D1_POINT_2F pts[1100]; int m = 0;
     for (int i = 0; i < 2048 - delay && m < 1100; i += 2)
         pts[m++] = D2D1::Point2F(cx + f.wave[i] * S, cy + f.wave[i + delay] * S);
     g.StrokePoly(pts, m, lw, false);
@@ -354,7 +418,7 @@ static void DrawBraid(DrawCtx& g) {
     for (int k = 0; k < 3; k++) {
         int shift = k * 340; float off = (k - 1) * g.h * 0.05f;
         g.SetColor(0.35f + k * 0.3f, 0.85f);
-        static D2D1_POINT_2F pts[1100]; int m = 0;
+        D2D1_POINT_2F pts[1100]; int m = 0;
         for (int i = 0; i < 2048 - shift && m < 1100; i += 2) {
             float x = (float)i / 2047.0f * g.w, env = sinf((float)i / 2048 * PI);
             pts[m++] = D2D1::Point2F(x, g.h / 2 + off + f.wave[i + shift] * g.h * 0.35f * env);
@@ -366,7 +430,8 @@ static void DrawBraid(DrawCtx& g) {
 static void DrawRidgeline(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int ROWS = 36, N = 160;
-    static float hist[ROWS][N] = {}; static int count = 0;
+    auto& hist = g.st->ridgeHist;
+    int& count = g.st->ridgeCount;
     // Shift history down, insert newest at row 0.
     for (int r = (count < ROWS ? count : ROWS - 1); r > 0; r--)
         memcpy(hist[r], hist[r - 1], sizeof(float) * N);
@@ -418,8 +483,8 @@ static void DrawStrings(DrawCtx& g) {
 static void DrawNebula(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int n = 420;
-    static std::vector<Particle> ps; static bool init = false;
-    if (!init) { init = true; Rng r(7); ps.resize(n);
+    auto& ps = g.st->nebula;
+    if (ps.empty()) { Rng r(7); ps.resize(n);
         for (int i = 0; i < n; i++) { ps[i].x = r() * TAU; ps[i].y = 0.25f + r() * 0.75f;
             ps[i].vx = 0.2f + r() * 0.8f; ps[i].hue = (float)i / n; ps[i].size = 1 + r() * 2.2f; } }
     float cx = g.w / 2, cy = g.h / 2, mn = g.w < g.h ? g.w : g.h, R = mn * 0.44f;
@@ -435,8 +500,9 @@ static void DrawNebula(DrawCtx& g) {
 static void DrawFountain(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int n = 500;
-    static std::vector<Particle> ps; static bool init = false; static int cursor = 0;
-    if (!init) { init = true; Rng r(11); ps.resize(n); for (auto& p : ps) { p.life = 0; p.size = 1 + r() * 2; } }
+    auto& ps = g.st->fountain;
+    int& cursor = g.st->fountainCursor;
+    if (ps.empty()) { Rng r(11); ps.resize(n); for (auto& p : ps) { p.life = 0; p.size = 1 + r() * 2; } }
     int burst = f.beat > 0.6f ? 26 : (int)(f.level * 6);
     for (int k = 0; k < burst; k++) {
         Particle& p = ps[cursor % n]; cursor++;
@@ -456,8 +522,8 @@ static void DrawFountain(DrawCtx& g) {
 static void DrawStarfield(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int n = 420;
-    static std::vector<Particle> ps; static bool init = false;
-    if (!init) { init = true; Rng r(23); ps.resize(n);
+    auto& ps = g.st->starfield;
+    if (ps.empty()) { Rng r(23); ps.resize(n);
         for (auto& p : ps) { p.x = (r() - 0.5f) * 2; p.y = (r() - 0.5f) * 2;
             p.life = 0.05f + r() * 0.95f; p.hue = r(); p.size = 0.6f + r() * 1.6f; } }
     float cx = g.w / 2, cy = g.h / 2, speed = 0.12f + f.level * 2.4f + f.beat * 0.8f;
@@ -474,8 +540,8 @@ static void DrawStarfield(DrawCtx& g) {
 static void DrawSwarm(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int n = 260;
-    static std::vector<Particle> ps; static bool init = false;
-    if (!init) { init = true; Rng r(31); ps.resize(n);
+    auto& ps = g.st->swarm;
+    if (ps.empty()) { Rng r(31); ps.resize(n);
         for (auto& p : ps) { p.x = r() * g.w; p.y = r() * g.h; p.hue = r(); p.size = 1 + r() * 1.8f; } }
     float tx = g.w / 2 + cosf(f.t * 0.6f) * g.w * 0.22f;
     float ty = g.h / 2 + sinf(f.t * 0.83f) * g.h * 0.22f;
@@ -543,7 +609,7 @@ static void DrawPolygonMorph(DrawCtx& g) {
 
 static void DrawTunnel(DrawCtx& g) {
     const AudioFrame& f = *g.f;
-    static float rings[5] = { 0.1f, 0.3f, 0.5f, 0.7f, 0.9f };
+    float* rings = g.st->tunnelRings;
     float cx = g.w / 2, cy = g.h / 2, R = sqrtf(g.w * g.w + g.h * g.h) / 2;
     float speed = 0.12f + f.level * 0.7f + f.beat * 0.4f, lw = g.h / 300.0f; if (lw < 2) lw = 2;
     float squash = 0.75f + f.bass * 0.2f;
@@ -596,8 +662,7 @@ static void DrawSpiro(DrawCtx& g) {
 
 static void DrawShards(DrawCtx& g) {
     const AudioFrame& f = *g.f;
-    struct Shard { float a, d, vd, rot, vr, size, life, hue; };
-    static std::vector<Shard> shards;
+    auto& shards = g.st->shards;
     float mn = g.w < g.h ? g.w : g.h, cx = g.w / 2, cy = g.h / 2;
     if (f.beat > 0.7f && shards.size() < 140) {
         for (int k = 0; k < 16; k++)
@@ -626,7 +691,7 @@ static void DrawShards(DrawCtx& g) {
 static void DrawLattice(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int rows = 12;
-    static float b[rows] = {}; Bands(f, b, rows, 0.35f);
+    float* b = g.st->latticeBands; Bands(f, b, rows, 0.35f);
     float cx = g.w / 2, cy = g.h / 2, mn = g.w < g.h ? g.w : g.h, R = mn * 0.5f;
     float lw = R / 260.0f; if (lw < 1.2f) lw = 1.2f;
     g.rt->SetTransform(D2D1::Matrix3x2F::Rotation(f.t * 0.08f * 180.0f / PI, D2D1::Point2F(cx, cy)));
@@ -646,10 +711,11 @@ static void DrawLattice(DrawCtx& g) {
 static void DrawPlasma(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const UINT W = 160, H = 90;
-    static uint8_t buf[W * H * 4];
-    static uint8_t lut[256 * 3]; static void* lutPal = nullptr;
-    if (lutPal != (void*)g.pal) {
-        lutPal = (void*)g.pal;
+    if (g.st->plasma.size() != (size_t)W * H * 4) g.st->plasma.assign((size_t)W * H * 4, 0);
+    uint8_t* buf = g.st->plasma.data();
+    uint8_t* lut = g.st->plasmaLut;
+    if (g.st->plasmaLutPal != (void*)g.pal) {
+        g.st->plasmaLutPal = (void*)g.pal;
         for (int i = 0; i < 256; i++) {
             D2D1_COLOR_F c = g.pal(i / 255.0f, 1.0f);
             lut[i * 3] = (uint8_t)(c.r * 255); lut[i * 3 + 1] = (uint8_t)(c.g * 255); lut[i * 3 + 2] = (uint8_t)(c.b * 255);
@@ -689,8 +755,8 @@ static void DrawInterference(DrawCtx& g) {
 static void DrawFlowField(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     const int n = 900;
-    static std::vector<Particle> gr; static bool init = false;
-    if (!init) { init = true; Rng r(41); gr.resize(n); for (auto& p : gr) { p.x = r(); p.y = r(); p.hue = r(); } }
+    auto& gr = g.st->flow;
+    if (gr.empty()) { Rng r(41); gr.resize(n); for (auto& p : gr) { p.x = r(); p.y = r(); p.hue = r(); } }
     float scale = 3.2f, speed = (0.04f + f.level * 0.35f + f.beat * 0.1f) * f.dt * 60;
     float size = g.h / 720.0f; if (size < 1) size = 1;
     for (auto& p : gr) {
@@ -725,8 +791,8 @@ static void DrawAurora(DrawCtx& g) {
 static void DrawRain(DrawCtx& g) {
     const AudioFrame& f = *g.f;
     int cols = (int)(g.w / 26.0f); if (cols < 24) cols = 24; if (cols > 72) cols = 72;
-    static float drops[72]; static int inited = 0;
-    if (inited != cols) { inited = cols; for (int i = 0; i < cols; i++) drops[i] = frand(); }
+    float* drops = g.st->rainDrops;
+    if (g.st->rainCols != cols) { g.st->rainCols = cols; for (int i = 0; i < cols; i++) drops[i] = frand(); }
     float cw = g.w / cols, dash = g.h / 60.0f; if (dash < 6) dash = 6;
     for (int i = 0; i < cols; i++) {
         float e = BinLog(f, (float)i / cols);
@@ -743,15 +809,15 @@ static void DrawRain(DrawCtx& g) {
 
 static void DrawPulseRings(DrawCtx& g) {
     const AudioFrame& f = *g.f;
-    struct Ring { float x, y, r, life, hue; };
-    static std::vector<Ring> rings; static bool wasBeat = false;
+    auto& rings = g.st->rings;
+    bool& wasBeat = g.st->ringsWasBeat;
     float mn = g.w < g.h ? g.w : g.h;
     if (f.beat > 0.7f && !wasBeat && rings.size() < 24)
         rings.push_back({ g.w * (0.2f + frand() * 0.6f), g.h * (0.2f + frand() * 0.6f), 0, 1, frand() });
     wasBeat = f.beat > 0.7f;
     float grow = mn * 0.55f;
     for (int i = (int)rings.size() - 1; i >= 0; i--) {
-        Ring& ring = rings[i];
+        PulseRing& ring = rings[i];
         ring.life -= f.dt * 0.5f; ring.r += grow * f.dt;
         if (ring.life <= 0) { rings.erase(rings.begin() + i); continue; }
         float lw = (g.h / 260.0f); if (lw < 2) lw = 2; lw *= ring.life;
