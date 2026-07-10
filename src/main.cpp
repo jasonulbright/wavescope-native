@@ -25,6 +25,7 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mferror.h>
+#include <dwmapi.h>
 
 #include <atomic>
 #include <cmath>
@@ -45,6 +46,7 @@
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "windowscodecs.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 // ---------------------------------------------------------------- utilities
 
@@ -2032,7 +2034,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         return rc;
     }
 
-    // Render loop: each window presents on vsync, so this paces itself.
+    // Render loop. GL engines vsync via wglSwapInterval; the D2D path does
+    // NOT block on present under DWM composition, so pace it with DwmFlush.
+    // Hidden/minimized windows are skipped entirely — a tray-hidden
+    // visualizer must cost ~nothing — and with no visible window the loop
+    // parks in MsgWaitForMultipleObjects instead of spinning.
     MSG msg = {};
     for (;;) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -2040,10 +2046,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
+        bool rendered = false, glPresented = false;
         for (App* v : g_views) {
+            if (!IsWindowVisible(v->hwnd) || IsIconic(v->hwnd)) continue;
             v->Render();
             if (v->pmHost.ready) v->pmHost.PollReload(); // hot-reload .milk folder
+            rendered = true;
+            glPresented |= (v->pmActive && v->pmHost.ready) ||
+                           (v->shaderActive && v->shaderHost.ready);
         }
+        if (!rendered)
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT);
+        else if (!glPresented)
+            DwmFlush(); // pace the D2D-only frame to the compositor clock
         UpdateCursorHide(g_views[0]->Now());
     }
 done:
