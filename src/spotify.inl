@@ -107,6 +107,11 @@ static SpResp SpHttps(const wchar_t* host, const wchar_t* verb, const wchar_t* p
     if (!s) return r;
     // Bounded waits so a hung request can't stall app shutdown behind a join.
     WinHttpSetTimeouts(s, 5000, 10000, 15000, 15000);
+    // Never follow redirects: WinHTTP would resend the Authorization header
+    // cross-host. Spotify's token/API endpoints answer in place; anything
+    // else fails loud instead of leaking a bearer.
+    DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+    WinHttpSetOption(s, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
     HINTERNET c = WinHttpConnect(s, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
     HINTERNET q = c ? WinHttpOpenRequest(c, verb, path, nullptr, WINHTTP_NO_REFERER,
                                          WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
@@ -318,6 +323,9 @@ struct SpotifyClient {
     }
 
     void Notify(const std::wstring& m) {
+        // Shutdown joins this worker; a modal box would hold the join hostage
+        // until someone clicks OK. Once quitting, stay silent.
+        if (quitFlag.load()) return;
         MessageBoxW(nullptr, m.c_str(), L"WaveScope \x2014 Spotify",
                     MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
     }
