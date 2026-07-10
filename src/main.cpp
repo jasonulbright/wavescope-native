@@ -691,6 +691,7 @@ struct App {
     int deckHover = -1;      // button under the cursor, or -1
     float deckActivity = 0;  // last time the deck was touched (for auto-hide)
     bool fullscreen = false;
+    bool alwaysOnTop = false;
     WINDOWPLACEMENT savedPlacement = { sizeof(WINDOWPLACEMENT) };
     int savedEngine = 0;         // persisted engine (0 wave, 1 gpu, 2 projm, 3 milk)
     RECT restoreRect = {};       // persisted window placement
@@ -1591,15 +1592,24 @@ struct App {
             L"C              calm mode (photosensitive-safe)\n"
             L"L              MilkDrop preset folder     RES \x25BE on the deck\n"
             L"F              fullscreen        H   HUD (auto-fades on idle)\n"
-            L"F1 / ?         this help         ESC close / restore / quit\n"
+            L"T              always on top     F1 / ?   this help\n"
+            L"ESC            close panel / menu / fullscreen, then quit\n"
             L"\n"
             L"Launch: WaveScope.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
             L"        [install-startup | remove-startup]   \x2014   tray icon: right-click";
-        float w = 620, h = 448;
+        float w = 620, h = 486;
         float x = (p.W() - w) * 0.5f, y = (p.H() - h) * 0.5f;
         if (x < 0) x = 0; if (y < 0) y = 0;
         p.Rect(x, y, w, h, 0.03f, 0.04f, 0.04f, 0.92f, true);
         p.Text(x + 22, y + 18, w - 32, h - 24, HELP, 0.95f, 0.96f, 0.95f, 0.96f);
+    }
+
+    // T / tray menu: keep the visualizer over every other window (the
+    // desktop's answer to the web app's ?embed=1 overlay uses).
+    void SetAlwaysOnTop(bool on) {
+        alwaysOnTop = on;
+        SetWindowPos(hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     void ToggleFullscreen() {
@@ -2108,9 +2118,10 @@ static App* AppFromHwnd(HWND h) {
 
 // ----- polish: tray icon, kiosk cursor-hide, launch-at-login -----
 
-#define WM_TRAY       (WM_APP + 1)
-#define IDM_TRAY_SHOW 1
-#define IDM_TRAY_QUIT 2
+#define WM_TRAY        (WM_APP + 1)
+#define IDM_TRAY_SHOW  1
+#define IDM_TRAY_QUIT  2
+#define IDM_TRAY_TOP   3
 
 static NOTIFYICONDATAW g_tray = {};
 static bool g_trayAdded = false;
@@ -2241,6 +2252,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'E':      a->CycleEngine(); break;       // WaveScope -> GPU -> projectM
         case 'G':      a->ToggleShader(); break;      // jump straight to GPU
         case 'R':      a->ToggleRecord(); break;      // web parity: R = record
+        case 'T':      a->SetAlwaysOnTop(!a->alwaysOnTop); break;
         case 'B':      g_spotify.OneButton(); break;  // Spotify: authorize + play
         case 'F':      a->ToggleFullscreen(); break;
         case 'H':      a->hud = !a->hud; break;
@@ -2266,6 +2278,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             POINT pt; GetCursorPos(&pt);
             HMENU m = CreatePopupMenu();
             AppendMenuW(m, MF_STRING, IDM_TRAY_SHOW, IsWindowVisible(hwnd) ? L"Hide" : L"Show");
+            AppendMenuW(m, MF_STRING | (a->alwaysOnTop ? MF_CHECKED : 0),
+                        IDM_TRAY_TOP, L"Always on top");
             AppendMenuW(m, MF_STRING, IDM_TRAY_QUIT, L"Quit");
             SetForegroundWindow(hwnd);
             TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
@@ -2279,6 +2293,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (LOWORD(wp) == IDM_TRAY_SHOW) {
             ShowWindow(hwnd, IsWindowVisible(hwnd) ? SW_HIDE : SW_SHOW);
             if (IsWindowVisible(hwnd)) SetForegroundWindow(hwnd);
+        } else if (LOWORD(wp) == IDM_TRAY_TOP) {
+            a->SetAlwaysOnTop(!a->alwaysOnTop);
         } else if (LOWORD(wp) == IDM_TRAY_QUIT) {
             PostQuitMessage(0);
         }
