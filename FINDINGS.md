@@ -89,7 +89,7 @@ tracks this pass's fixes.
 
 | # | Sev | Where | Finding / failure scenario | Status |
 |---|-----|-------|----------------------------|--------|
-| Z3 | HIGH | git history | Z2's "verified clean" checked **messages only**. (a) 10 commits on `main` — already force-pushed to the public GitHub remote — carry an AI-vendor **author/committer identity**; `git log --format=%an` leaks it. (b) `refs/original/refs/heads/master` (the history-rewrite backup ref) still holds the entire pre-rewrite history, trailers included: `git log --all` shows everything the rewrite was meant to remove. | **OWNER ACTION** — history rewrites are yours to run. One-time, from the repo root: see "Z3 remediation" below. |
+| Z3 | HIGH | git history | Z2's "verified clean" checked **messages only**. (a) 10 commits on `main` — already force-pushed to the public GitHub remote — carry an AI-vendor **author/committer identity**; `git log --format=%an` leaks it. (b) `refs/original/refs/heads/master` (the history-rewrite backup ref) still holds the entire pre-rewrite history, trailers included: `git log --all` shows everything the rewrite was meant to remove. | fixed (2026-07-10, owner-approved): identity rewrite + backup-ref purge + reflog expiry run and force-pushed; verified — one identity across every ref, zero trailer matches. Remediation kept below for provenance. |
 
 **Z3 remediation (run once, owner — Git Bash, from this repo's root; NOT
 PowerShell, which expands `$GIT_…` inside double quotes and mangles the
