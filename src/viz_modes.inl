@@ -1,4 +1,4 @@
-// SpectraViz visualizer library: palettes, the DrawCtx primitives, and all 34
+// WaveScope visualizer library: palettes, the DrawCtx primitives, and all 34
 // modes ported from the WaveScope web engine (the TypeScript draw() functions
 // translate nearly line-for-line). Included by main.cpp as one translation
 // unit; relies on AudioFrame, Hsla, PI, TAU, BinLog defined there/below.
