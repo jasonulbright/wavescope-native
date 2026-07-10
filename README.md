@@ -52,7 +52,7 @@ projectM is the one deliberate dependency (LGPL-2.1): `projectM-4.dll` +
 they need the VC runtime (present wherever VS or the VC redist is installed).
 
 Keys: `SPACE`/`RIGHT` next (mode or preset), `LEFT` prev, `P` palette,
-`N` new custom palette (color picker), `1`/`2`/`3` source (loopback/mic/demo),
+`N` palettes + shuffle panel, `1`/`2`/`3` source (loopback/mic/demo),
 `4` open audio file, `S` shuffle timer, `C` calm mode, `R` resolution target,
 `L` MilkDrop preset folder, `M` MilkDrop engine, `G` GPU shader engine,
 `B` Spotify (authorize + play), `F` fullscreen, `H` HUD, `ESC` quit. Settings
@@ -89,9 +89,9 @@ feature:
 | Audio-file source | done (key 4, Media Foundation decode + play) |
 | Spotify one-button (PKCE) | done (B / SPOT: authorize once, then play) |
 | Resolution targets (1080-8K) | done (key R; offscreen render + scale) |
-| Shuffle timer | done for modes (key S); palette-shuffle + include list with the deck |
+| Shuffle timer | done (key S for modes; palette-shuffle + include list in the N panel) |
 | Calm mode (photosensitivity) | done (key C) |
-| Custom palette creation | done (N: pick 1-3 colors; full stop editor with deck) |
+| Custom palette creation | done (N panel: 3-stop editor + color picker + naming) |
 | Settings / preset persistence | done (spectraviz.ini beside the exe) |
 | projectM preset library | done (scans a folder of .milk; L picks your archive) |
 | GPU shader modes (plasma/tunnel/fractal) | done (G: real GLSL fragment shaders on the GL context) |
@@ -110,14 +110,14 @@ feature:
    4K/8K, rendered into an offscreen bitmap then scaled to the window),
    shuffle timer (S: off/15s/30s/1m/5m, hops modes or projectM presets), calm
    mode (C: excludes the 5 beat-burst modes + softens the beat envelope).
-   *Palette-shuffle + the per-palette include list come with the deck (step
+   *Palette-shuffle + the per-palette include list are in the N panel (step
    7), since they need UI.*
-3. ~~**Custom palettes + persistence.**~~ DONE. `N` builds a custom palette
-   from up to 3 colors via the standard Windows color picker (cancel to stop
-   early); it joins the `P` rotation. Settings (mode, palette, resolution,
-   shuffle, calm) + custom palettes persist to `spectraviz.ini` beside the
-   exe, restored on launch. *A richer color-stop editor arrives with the
-   deck (step 7); source is intentionally not restored (starts on loopback).*
+3. ~~**Custom palettes + persistence.**~~ DONE. `N` opens the palettes panel
+   (see step 7) to build a three-stop palette from the standard color picker;
+   it joins the `P` rotation. Settings (mode, palette, resolution, shuffle,
+   calm, palette-shuffle + include list) and custom palettes persist to
+   `spectraviz.ini` beside the exe, restored on launch. *Source is
+   intentionally not restored (starts on loopback).*
 4. ~~**projectM preset library.**~~ DONE. Scans a folder of raw `.milk`
    files and cycles all of them (SPACE/arrows/shuffle); `L` picks your own
    archive folder; preset name + count shown in the title bar. (Native has
@@ -152,9 +152,15 @@ feature:
    everywhere, never an aliased GL font, and never vanish when you switch
    engines. Mouse input is forwarded from the GL child windows so the deck is
    clickable there too. The overlay only re-renders/re-uploads when it changes
-   (dirty-checked), so it's cheap even at high resolution. Still to do
-   (optional): the palette-shuffle include list + a full color-stop palette
-   editor.
+   (dirty-checked), so it's cheap even at high resolution.
+
+   **Palettes + shuffle panel DONE** (`N`): a port of the web
+   "PALETTES + SHUFFLE" window — a "shuffle palettes too" toggle, a checklist
+   of every palette (with live gradient previews) controlling the shuffle
+   pool, and a new-palette editor (three color-stop swatches via the standard
+   picker, a live blended preview, a name field, and *add palette*). Drawn
+   through the same painter, so it's crisp over every engine. That closes the
+   last parity items.
 8. ~~**Spotify.**~~ DONE (`src/spotify.inl`). `B` (or the `SPOT` deck button)
    runs OAuth2 Authorization Code + **PKCE** — no client secret, so nothing
    sensitive ships in the exe. The browser authorizes once; the redirect to
