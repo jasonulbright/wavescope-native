@@ -91,27 +91,39 @@ tracks this pass's fixes.
 |---|-----|-------|----------------------------|--------|
 | Z3 | HIGH | git history | Z2's "verified clean" checked **messages only**. (a) 10 commits on `main` — already force-pushed to the public GitHub remote — carry an AI-vendor **author/committer identity**; `git log --format=%an` leaks it. (b) `refs/original/refs/heads/master` (the history-rewrite backup ref) still holds the entire pre-rewrite history, trailers included: `git log --all` shows everything the rewrite was meant to remove. | **OWNER ACTION** — history rewrites are yours to run. One-time, from the repo root: see "Z3 remediation" below. |
 
-**Z3 remediation (run once, owner):**
+**Z3 remediation (run once, owner — Git Bash, from this repo's root; NOT
+PowerShell, which expands `$GIT_…` inside double quotes and mangles the
+script):**
 
 ```
-git filter-branch -f --env-filter "
-if test \"$GIT_AUTHOR_EMAIL\" = claude@anthropic.com; then
-  GIT_AUTHOR_NAME='Jason Ulbright'; GIT_AUTHOR_EMAIL=jason.ulbright@gmail.com
+git filter-branch -f --env-filter '
+if [ "$GIT_AUTHOR_EMAIL" != "jason.ulbright@gmail.com" ]; then
+  GIT_AUTHOR_NAME="Jason Ulbright"; GIT_AUTHOR_EMAIL="jason.ulbright@gmail.com"
   export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL
 fi
-if test \"$GIT_COMMITTER_EMAIL\" = claude@anthropic.com; then
-  GIT_COMMITTER_NAME='Jason Ulbright'; GIT_COMMITTER_EMAIL=jason.ulbright@gmail.com
+if [ "$GIT_COMMITTER_EMAIL" != "jason.ulbright@gmail.com" ]; then
+  GIT_COMMITTER_NAME="Jason Ulbright"; GIT_COMMITTER_EMAIL="jason.ulbright@gmail.com"
   export GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
-fi" -- main
+fi
+' -- main
 git update-ref -d refs/original/refs/heads/master
-git update-ref -d refs/original/refs/heads/main 2>nul
 git reflog expire --expire=now --all
 git gc --prune=now
 git update-ref refs/remotes/origin/main main
 git push --force origin main
 ```
 
-Verify afterwards: `git log --all --format="%an %ae %cn %ce %s %b" | findstr /i "claude anthropic co-authored"` must print nothing. (Run it in Git Bash with `grep -ci` if you prefer.) Note the pre-rewrite `wavescope-native.7z` backup also contains the old history — keep it private or delete it.
+(The `!=` form maps every non-owner identity to the owner — this repo has
+exactly two identities, so it needs no third-party strings in this file.)
+Verify afterwards in Git Bash — both must print nothing / `0`:
+
+```
+git log --all --format="%ae %ce" | grep -v jason.ulbright@gmail.com
+git log --all --format="%s %b" | grep -ci co-authored
+```
+
+Note the pre-rewrite `wavescope-native.7z` backup also contains the old
+history — keep it private or delete it.
 
 ### Crashes / correctness
 
