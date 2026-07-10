@@ -145,8 +145,9 @@ static int RunSelfTest(App* v) {
         out(L"projectm: engine failed to start -> FAIL"); rc = 1;
     } else {
         for (int i = 0; i < 60; i++) { pump(); v->Render(); }
-        AudioFrame f; v->tap.Analyze(f, v->Now());
-        v->pmHost.RenderEngine(f);
+        float pcm[4800];
+        int n = v->tap.ReadNew(v->pmPcmCursor, pcm, 4800, v->Now());
+        v->pmHost.RenderEngine(pcm, n);
         std::vector<uint8_t> px; int w = 0, h = 0;
         bool cap = v->pmHost.ReadBack(px, w, h);
         float lit = cap ? StLitPct(px.data(), px.size()) : 0.0f;

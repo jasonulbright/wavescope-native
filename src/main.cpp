@@ -125,12 +125,44 @@ public:
         default:       return L"SYSTEM AUDIO";
         }
     }
-    // Play + analyze a decoded audio file (Media Foundation).
+    // Play + analyze a decoded audio file (Media Foundation). The generation
+    // bump makes RunFile restart even when the source is already FILE, so
+    // picking a second file switches tracks.
     void SetFile(const wchar_t* path) {
         AcquireSRWLockExclusive(&m_lock);
         wcsncpy_s(m_filePath, path, _TRUNCATE);
         ReleaseSRWLockExclusive(&m_lock);
+        m_fileGen++;
         m_source = SRC_FILE;
+    }
+
+    // Copy up to `maxn` samples that arrived after `cursor` (oldest first),
+    // advancing the cursor — the projectM feed, which must see each sample
+    // exactly once, not a re-sent sliding window. On the demo source the
+    // signal is synthesized at real-time pace instead.
+    int ReadNew(uint64_t& cursor, float* out, int maxn, float now) {
+        if (m_source.load() == SRC_DEMO) {
+            float sr = (float)(m_sampleRate ? m_sampleRate : 48000);
+            if (m_demoFeedT == 0.0) m_demoFeedT = now;
+            int n = (int)((now - (float)m_demoFeedT) * sr);
+            if (n <= 0) return 0;
+            if (n > maxn) { m_demoFeedT = now - (double)maxn / sr; n = maxn; }
+            float cents[5]; DemoDetune((float)m_demoFeedT, cents);
+            for (int i = 0; i < n; i++)
+                out[i] = DemoSynth(m_demoFeedT + (double)i / sr, cents);
+            m_demoFeedT += (double)n / sr;
+            return n;
+        }
+        AcquireSRWLockShared(&m_lock);
+        uint64_t w = m_writeIdx;
+        if (cursor > w) cursor = w;
+        uint64_t avail = w - cursor;
+        if (avail > (uint64_t)RING) { cursor = w - RING; avail = RING; } // overran: skip ahead
+        int n = (int)(avail < (uint64_t)maxn ? avail : (uint64_t)maxn);
+        for (int i = 0; i < n; i++) out[i] = m_ring[(cursor + i) % RING];
+        ReleaseSRWLockShared(&m_lock);
+        cursor += n;
+        return n;
     }
 
     // Snapshot the newest 2048 samples and analyze them.
@@ -144,10 +176,12 @@ public:
 
         float window[2048];
         if (m_source.load() == SRC_DEMO) {
-            // Synthesize a coherent window ending at the current time.
+            // Synthesize a coherent window ending at the current time. The
+            // detune is sampled once per window so phase stays clean.
             float sr = (float)(m_sampleRate ? m_sampleRate : 48000);
+            float cents[5]; DemoDetune(now, cents);
             for (int i = 0; i < 2048; i++)
-                window[i] = DemoSynth((double)now - (double)(2048 - i) / sr);
+                window[i] = DemoSynth((double)now - (double)(2048 - i) / sr, cents);
         } else {
             AcquireSRWLockShared(&m_lock);
             uint64_t w = m_writeIdx;
@@ -159,25 +193,25 @@ public:
         }
         for (int i = 0; i < 2048; i++) f.wave[i] = window[i];
 
-        // Hann window + radix-2 FFT (2048 point).
+        // The Web Audio analyser recipe, exactly: Blackman window, FFT,
+        // |X|/N, per-bin smoothing 0.8 on LINEAR magnitudes, then the
+        // [-100,-30] dB byte mapping. Same music must read the same here.
         static float re[2048], im[2048];
         for (int i = 0; i < 2048; i++) {
-            float hann = 0.5f * (1.0f - cosf(TAU * i / 2047.0f));
-            re[i] = window[i] * hann;
+            float bw = 0.42f - 0.5f * cosf(TAU * i / 2048.0f)
+                             + 0.08f * cosf(2.0f * TAU * i / 2048.0f);
+            re[i] = window[i] * bw;
             im[i] = 0.0f;
         }
         Fft2048(re, im);
-
-        // Magnitudes -> dB -> 0..1 with the analyser's [-100,-30] dB range,
-        // then per-bin exponential smoothing (0.8), matching the web engine.
         for (int i = 0; i < 1024; i++) {
-            float mag = sqrtf(re[i] * re[i] + im[i] * im[i]) / 1024.0f;
-            float db = 20.0f * log10f(mag + 1e-9f);
+            float mag = sqrtf(re[i] * re[i] + im[i] * im[i]) / 2048.0f;
+            m_smooth[i] = m_smooth[i] * 0.8f + mag * 0.2f;
+            float db = 20.0f * log10f(m_smooth[i] + 1e-12f);
             float norm = (db + 100.0f) / 70.0f;
             if (norm < 0) norm = 0;
             if (norm > 1) norm = 1;
-            m_smooth[i] = m_smooth[i] * 0.8f + norm * 0.2f;
-            f.fft[i] = m_smooth[i];
+            f.fft[i] = norm;
         }
 
         // Band energies (split at 250 Hz / 4 kHz) + RMS level + beat.
@@ -213,30 +247,74 @@ private:
         return ((AudioTap*)param)->Run();
     }
 
-    // The demo signal: a slow chord (saw + sine partials) with a bass kick,
-    // so the app is never dead-silent when no real audio is playing.
-    static float DemoSynth(double t) {
+    // The demo signal, matching the web spec: saw + harmonic sine partials
+    // with slow LFO detune, a 120->40 Hz kick every 500 ms, and the chord
+    // retuned every 8 kicks (4 s) over roots A2/C3/G2/D3. Analysis-only.
+    static const float* DemoRatios() {
+        static const float r[5] = { 1.0f, 1.5f, 2.0f, 3.0f, 4.02f };
+        return r;
+    }
+    // Per-partial detune in cents, sampled once per synthesized block so the
+    // phase math below (t*freq) stays artifact-free within the block.
+    static void DemoDetune(float t, float cents[5]) {
+        const float* ratios = DemoRatios();
+        for (int k = 0; k < 5; k++) {
+            float lfoHz = 0.05f + ratios[k] * 0.07f;
+            cents[k] = 2.0f * ratios[k] * sinf(TAU * lfoHz * t);
+        }
+    }
+    static float DemoSynth(double t, const float cents[5]) {
         static const float roots[4] = { 110.0f, 130.81f, 98.0f, 146.83f };
-        int bar = (int)(t / 2.0);
-        float root = roots[((bar % 4) + 4) % 4];
-        const float ratios[5] = { 1.0f, 1.5f, 2.0f, 3.0f, 4.02f };
+        int kickN = (int)(t / 0.5);                       // one kick per 500 ms
+        float root = roots[((kickN / 8) % 4 + 4) % 4];    // retune every 8 kicks
+        const float* ratios = DemoRatios();
         float s = 0.0f;
         for (int k = 0; k < 5; k++) {
-            float freq = root * ratios[k];
+            float freq = root * ratios[k] * powf(2.0f, cents[k] / 1200.0f);
             float ph = (float)(t * freq - floor(t * freq));
             float osc = ratios[k] < 2.0f ? (2.0f * ph - 1.0f) : sinf(TAU * ph);
             s += osc * (0.18f / ratios[k]);
         }
-        double kt = t - floor(t / 0.5) * 0.5;      // 0..0.5, kick every 500 ms
-        s += sinf(TAU * 55.0f * (float)t) * expf(-(float)kt * 9.0f) * 0.7f;
+        // Kick: 120 Hz sweeping exponentially to 40 Hz over 120 ms (phase is
+        // the closed-form integral), gain 0.9 decaying to ~0 by 250 ms.
+        double kt = t - floor(t / 0.5) * 0.5;
+        const double A = 9.1553;                 // ln(3)/0.12: 120->40 in 120 ms
+        double phase = kt < 0.12
+            ? 120.0 / A * (1.0 - exp(-A * kt))
+            : 120.0 / A * (1.0 - exp(-A * 0.12)) + 40.0 * (kt - 0.12);
+        s += sinf(TAU * (float)(phase - floor(phase))) * 0.9f * expf(-(float)kt * 27.0f);
         return s * 0.6f;
     }
 
+    // Reopens capture when the user switches the Windows default device (the
+    // old endpoint would otherwise keep "working", silently, until unplug).
+    struct DeviceNotify : IMMNotificationClient {
+        std::atomic<uint32_t>* gen = nullptr;
+        ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+        ULONG STDMETHODCALLTYPE Release() override { return 1; }
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+            if (riid == __uuidof(IUnknown) || riid == __uuidof(IMMNotificationClient)) {
+                *ppv = this; return S_OK;
+            }
+            *ppv = nullptr; return E_NOINTERFACE;
+        }
+        HRESULT STDMETHODCALLTYPE OnDeviceStateChanged(LPCWSTR, DWORD) override { return S_OK; }
+        HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return S_OK; }
+        HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return S_OK; }
+        HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow, ERole role, LPCWSTR) override {
+            if (role == eConsole && gen) (*gen)++;
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
+    };
+
     // Capture thread: (re)opens WASAPI for loopback or mic, and reinitializes
-    // when the source changes. Demo needs no capture (Analyze synthesizes).
+    // when the source changes, the default device changes, or the endpoint
+    // fails (unplugged). Demo needs no capture (Analyze synthesizes).
     DWORD Run() {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         MFStartup(MF_VERSION, MFSTARTUP_LITE);
+        DeviceNotify notify; notify.gen = &m_deviceGen;
         while (!m_quit) {
             int src = m_source.load();
             if (src == SRC_DEMO) { Sleep(30); continue; }
@@ -247,12 +325,16 @@ private:
             IAudioClient* client = nullptr;
             IAudioCaptureClient* capture = nullptr;
             WAVEFORMATEX* fmt = nullptr;
+            bool notifyOn = false;
+            uint32_t devGen = m_deviceGen.load();
 
             EDataFlow flow = (src == SRC_MIC) ? eCapture : eRender;
             DWORD streamFlags = (src == SRC_MIC) ? 0 : AUDCLNT_STREAMFLAGS_LOOPBACK;
 
             HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
                                           __uuidof(IMMDeviceEnumerator), (void**)&devEnum);
+            if (SUCCEEDED(hr))
+                notifyOn = SUCCEEDED(devEnum->RegisterEndpointNotificationCallback(&notify));
             if (SUCCEEDED(hr)) hr = devEnum->GetDefaultAudioEndpoint(flow, eConsole, &device);
             if (SUCCEEDED(hr)) hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&client);
             if (SUCCEEDED(hr)) hr = client->GetMixFormat(&fmt);
@@ -269,13 +351,16 @@ private:
                     fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
                     (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
                      ((WAVEFORMATEXTENSIBLE*)fmt)->SubFormat.Data1 == 3);
+                ULONGLONG lastData = GetTickCount64();
 
-                while (!m_quit && m_source.load() == src) {
+                while (!m_quit && m_source.load() == src && m_deviceGen.load() == devGen) {
                     Sleep(5);
                     UINT32 packet = 0;
+                    bool got = false;
                     while (SUCCEEDED(capture->GetNextPacketSize(&packet)) && packet > 0) {
                         BYTE* data = nullptr; UINT32 frames = 0; DWORD flags = 0;
                         if (FAILED(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
+                        got = frames > 0;
                         AcquireSRWLockExclusive(&m_lock);
                         if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
                             for (UINT32 i = 0; i < frames; i++) m_ring[(m_writeIdx++) % RING] = 0.0f;
@@ -295,10 +380,28 @@ private:
                         ReleaseSRWLockExclusive(&m_lock);
                         capture->ReleaseBuffer(frames);
                     }
+                    ULONGLONG nowMs = GetTickCount64();
+                    if (got) {
+                        lastData = nowMs;
+                    } else if (nowMs - lastData > 60) {
+                        // Loopback stops delivering packets when the machine
+                        // goes silent. Feed real-time zeros so the analysis
+                        // decays to dark (web behavior) instead of freezing
+                        // on the last window — and so projectM's PCM feed
+                        // hears the silence too.
+                        UINT32 zeros = (UINT32)((nowMs - lastData) * m_sampleRate / 1000);
+                        UINT32 cap = m_sampleRate / 5;   // at most 200 ms per catch-up
+                        if (zeros > cap) zeros = cap;
+                        AcquireSRWLockExclusive(&m_lock);
+                        for (UINT32 i = 0; i < zeros; i++) m_ring[(m_writeIdx++) % RING] = 0.0f;
+                        ReleaseSRWLockExclusive(&m_lock);
+                        lastData = nowMs;
+                    }
                 }
                 client->Stop();
             }
 
+            if (notifyOn) devEnum->UnregisterEndpointNotificationCallback(&notify);
             if (fmt) CoTaskMemFree(fmt);
             SafeRelease(&capture);
             SafeRelease(&client);
@@ -316,6 +419,7 @@ private:
     // the file. Runs until the source changes or the app quits.
     void RunFile() {
         wchar_t path[MAX_PATH];
+        uint32_t gen = m_fileGen.load();   // a new SetFile restarts playback
         AcquireSRWLockShared(&m_lock);
         wcsncpy_s(path, m_filePath, _TRUNCATE);
         ReleaseSRWLockShared(&m_lock);
@@ -364,7 +468,7 @@ private:
         if (SUCCEEDED(hr)) {
             m_sampleRate = RATE;
             std::vector<float> pending; size_t pos = 0; // interleaved stereo
-            while (!m_quit && m_source.load() == SRC_FILE) {
+            while (!m_quit && m_source.load() == SRC_FILE && m_fileGen.load() == gen) {
                 if ((pending.size() - pos) < (size_t)bufFrames * 2 * 4) {
                     DWORD flags = 0; IMFSample* sample = nullptr;
                     if (SUCCEEDED(reader->ReadSample(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0,
@@ -453,12 +557,15 @@ private:
     HANDLE m_thread = nullptr;
     std::atomic<bool> m_quit{false};
     std::atomic<int> m_source{ SRC_LOOPBACK };
+    std::atomic<uint32_t> m_fileGen{0};
+    std::atomic<uint32_t> m_deviceGen{0};
     SRWLOCK m_lock = SRWLOCK_INIT;
     float m_ring[RING] = {};
     uint64_t m_writeIdx = 0;
     UINT32 m_sampleRate = 48000;
     float m_smooth[1024] = {};
     float m_level = 0, m_bassAvg = 0, m_beat = 0, m_lastT = 0;
+    double m_demoFeedT = 0;   // ReadNew's real-time cursor on the demo source
     wchar_t m_filePath[MAX_PATH] = {};
 };
 
@@ -518,6 +625,7 @@ struct App {
     HINSTANCE inst = nullptr;
     ProjectMHost pmHost;
     bool pmActive = false;
+    uint64_t pmPcmCursor = 0;   // read position into the tap for the PCM feed
     ShaderHost shaderHost;
     bool shaderActive = false;
     int shaderIdx = 0;       // index into the GPU shader modes
@@ -765,7 +873,9 @@ struct App {
                        tap.SourceName(), milkMode ? L"MILK" : L"PROJM", pmHost.PresetName(),
                        RES_OPTS[resIdx].name, fps);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
-            pmHost.RenderEngine(frame);
+            float pcm[4800];   // up to 100 ms of new samples per frame
+            int newN = tap.ReadNew(pmPcmCursor, pcm, 4800, now);
+            pmHost.RenderEngine(pcm, newN);
             pmHost.BeginOverlay();
             pmHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
             pmHost.Present();
