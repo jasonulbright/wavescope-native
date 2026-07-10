@@ -1,100 +1,99 @@
 # WaveScope native — parity matrix vs. the web app
 
 Source of truth: `C:\projects\wavescope` (app/src/lib/viz/*). Status values:
-**done** (verified matching), **partial**, **missing**, **N/A-desktop**.
-"Plan" says what this pass builds. Updated as work lands.
+**done** (verified), **N/A-desktop**, **ASK OWNER**. Verification = unit
+tests (`build.bat` runs them) + `WaveScope.exe selftest` + manual
+walkthrough (`DEMO-CHECKLIST.md`).
 
 ## Analysis engine (must feel identical)
 
-| Contract item | Status | Plan / note |
+| Contract item | Status | Note |
 |---|---|---|
-| FFT 2048 → 1024 bins, smoothing 0.8 | partial | Fix normalization (÷2048), Blackman window, smooth linear magnitudes pre-dB (FINDINGS P2) |
-| Waveform 2048 samples | done | float −1..1 (web bytes; same information) |
-| Bands by Hz from real device rate (20-250 / 250-4k / 4k-16k) | done | floor/ceil bin edges match `audio-engine.ts` |
-| Level: RMS ¼-decimation, smooth 0.2 | done | |
-| Beat: avg 0.04, ×1.35 gate, 0.08 floor, e^−6dt decay | done | |
+| FFT 2048 → 1024 bins, smoothing 0.8 | done | Blackman, \|X\|/N, smoothing on linear magnitudes pre-dB — the exact analyser recipe; unit-tested |
+| Waveform 2048 samples | done | float −1..1 |
+| Bands by Hz from real device rate (20-250 / 250-4k / 4k-16k) | done | unit-tested at 48 k and 44.1 k |
+| Level: RMS ¼-decimation, smooth 0.2 | done | unit-tested |
+| Beat: avg 0.04, ×1.35 gate, 0.08 floor, e^−6dt decay | done | unit-tested (charge + decay slope) |
 | Per-frame payload {fft, wave, level, bass, mid, treble, beat, t, dt} | done | `AudioFrame` |
-| Silence behaves (decay, not freeze) | missing | Feed zeros on stalled loopback (FINDINGS P3) |
+| Silence behaves (decay, not freeze) | done | zeros fed on stalled loopback |
 
 ## Engines
 
-| Feature | Status | Plan / note |
+| Feature | Status | Note |
 |---|---|---|
-| Built-in: 34 modes, 5 families (9/6/6/6/7) | done | Math, fade, flash flags spot-verified 1:1 against modes/*.ts |
-| Per-window mode state (companions don't share pools) | missing | Replace function statics with per-view state (FINDINGS C4) |
-| GPU engine: 17 shader modes | partial (3/17) | Port remaining 14 WGSL bodies to GLSL 330 |
-| GPU uniforms: res/time/level/bass/mid/treble/beat | done | |
-| GPU FFT texture (1024×r8) + waveform texture (2048×r8), `spec()/specLog()/wav()` | missing | Add two 1-D textures updated per frame + prelude helpers |
-| projectM: real .milk via native libprojectM | done | DLL pinned beside exe |
-| 13 bundled presets (same files as web) | partial (2) | Copy the 13 from `app/public/presets-milk/` |
-| User preset folder (library) + hot reload | done | Exceeds web (folder watch) |
-| Preset blend on switch | partial | Native hard-cuts to dodge a white flash in soft-cut; investigate and restore 2.7 s blend if clean |
-| Butterchurn as separate engine | N/A-desktop | Native projectM covers MilkDrop |
-| Demo signal per spec (kick 500 ms, retune 8 bars, A2/C3/G2/D3, LFO detune) | partial | Retune cadence + kick sweep + detune (FINDINGS P4) |
+| Built-in: 34 modes, 5 families (9/6/6/6/7) | done | math/fade/flash verified vs modes/*.ts; registry unit-tested |
+| Per-window mode state | done | `VizState`, one per window |
+| GPU engine: 17 shader modes | done | all WGSL bodies ported to GLSL 330; selftest asserts 17/17 compile |
+| GPU FFT texture (1024×r8) + waveform texture (2048×r8), `spec()/specLog()/wav()` | done | selftest captures both texture-fed shaders |
+| projectM: real .milk via native libprojectM | done | |
+| Bundled presets (same files as web) | done | all 15 from `presets-milk/` |
+| User preset folder (library) + hot reload | done | exceeds web |
+| Preset blend on switch | done* | deliberate hard cut: projectM's soft-cut blends before the incoming preset's first frame and flashes white; the clean cut is the better feel. Documented deviation. |
+| Butterchurn as separate engine | N/A-desktop | native projectM covers MilkDrop |
+| Demo signal per spec (kick 500 ms sweep 120→40, retune 8 kicks, A2/C3/G2/D3, LFO detune) | done | |
 
 ## Sources
 
-| Feature | Status | Plan / note |
+| Feature | Status | Note |
 |---|---|---|
-| WASAPI loopback (silent, no picker) | done | Superior to web `getDisplayMedia`; keep |
-| Microphone | done | raw (no AGC/EC — WASAPI default matches web constraints) |
-| Audio file (audible, looped) | done | MF decode → WASAPI render; fix same-source re-pick (C5) |
+| WASAPI loopback (silent, no picker) | done | superior to web `getDisplayMedia`; kept |
+| Microphone | done | |
+| Audio file (audible, looped) | done | re-pick switches tracks |
 | Demo | done | |
-| Source-ended / device-change handling | partial | IMMNotificationClient on default-device change (C6) |
+| Source-ended / device-change handling | done | IMMNotificationClient + endpoint-failure reopen |
 
 ## Spotify
 
-| Feature | Status | Plan / note |
+| Feature | Status | Note |
 |---|---|---|
-| Auth Code + PKCE, no secret, client ID in ini | done | Hardening in FINDINGS S1-S5 |
+| Auth Code + PKCE, no secret, client ID in ini | done | listener hardened (bind-first, exclusive, state-validating accept loop) |
 | Redirect 127.0.0.1:8888/callback | done | |
-| Scopes user-modify/read-playback-state | done | + user-read-currently-playing for the HUD line |
-| Play w/ device transfer fallback, 403 → Premium msg | done | Uses transfer-with-play (equivalent to spec's play→404→transfer) |
-| Now-playing in HUD | missing | Poll currently-playing while authed; show track — artist |
-| Tokens DPAPI-protected | done | Already implemented (Phase 5.1 satisfied) |
+| Scopes + playback start w/ device transfer, 403 → Premium msg | done | |
+| Now-playing in HUD | done | 10 s poller, silent resume at launch |
+| Tokens DPAPI-protected | done | |
 
 ## Console / UX
 
-| Feature | Status | Plan / note |
+| Feature | Status | Note |
 |---|---|---|
-| 6 palettes (Ultramarine default … Magma) | done | Colors identical to palettes.ts |
-| Custom palettes (stops editor, include list) | done | N panel |
-| Shuffle off/15s/30s/1m/5m | done | |
-| Shuffle **DJ** (hops engine + visual) | missing | Add; doubles as Phase-5 Auto-DJ |
-| Calm mode (no bursts, softened beat) | done | flash-flagged modes excluded; beat ×0.2 |
-| Resolution targets auto/1080/1440/2160/4320 | done | Offscreen render + scale |
+| 6 palettes | done | curves unit-tested |
+| Custom palettes (stops editor, include list) | done | |
+| Shuffle off/15s/30s/1m/5m/**DJ** | done | DJ hops engine + visual (= Auto-DJ) |
+| Calm mode | done | flash modes excluded, beat ×0.2 |
+| Resolution targets auto/1080/1440/2160/4320 | done | |
 | Fullscreen | done | |
-| Auto-hiding deck (3 s idle) | done | idle timing aligned to 3 s |
-| Monospace HUD: SRC/MODE/RES/FPS/SHUFFLE/REC/now-playing | partial | Add SHUFFLE, REC, now-playing lines |
-| Shortcuts: Space/→ ← P S C F H ? Esc | partial | Realign: M=displays, R=record; engine keys move (see README); Esc restores before quitting |
+| Auto-hiding deck (3 s idle) | done | |
+| HUD: SRC/MODE/RES/FPS/SHUFFLE/REC/now-playing | done | |
+| Shortcuts: Space/→ ← F H P S C, M=displays, R=record, ?, Esc=restore-then-quit | done | + native E/G/L/T/B/N (documented in README) |
 | Help overlay | done | F1 / ? |
-| Design language (instrument black, ultramarine, monospace) | done | Consolas (system) as the monospace readout — no font embedding, no license risk |
+| Design language (instrument black, ultramarine, monospace readouts) | done | system Consolas — no font embedding |
 
 ## Persistence
 
-| Item | Status | Plan / note |
-|---|---|---|
-| Mode/palette/resolution/shuffle/calm | done | wavescope.ini |
-| Custom palettes + include list | done | |
-| Spotify auth (DPAPI blob) + client ID | done | |
-| Engine (+ MILK library folder) | missing | Add |
-| Window placement | missing | Add |
+| Item | Status |
+|---|---|
+| Mode/palette/resolution/shuffle/calm | done |
+| Custom palettes + include list | done |
+| Spotify auth (DPAPI) + client ID | done |
+| Engine + MILK library folder | done |
+| Window placement (validated against live monitors) | done |
 
 ## Desktop-only (Phase 5)
 
-| Feature | Status | Plan / note |
+| Feature | Status | Note |
 |---|---|---|
-| DPAPI token storage | done | Verified in review |
-| Clip recording → MP4 (MF H.264 + AAC), hotkey R | missing | Render-target capture + analysed-audio mix; `wavescope-<timestamp>.mp4` (brief says `spectraviz-`; that predates the product rename — deviating deliberately, flagged for the owner) |
-| Multi-monitor companion windows, one engine | partial | `wall` exists but runs N independent taps; rework: one tap drives every window, M/displays menu spawns companions |
-| Tray icon + minimize-to-tray | done | |
-| Always-on-top toggle | missing | Add (tray menu + key) |
-| Launch at login (HKCU Run, off by default) | done | install-startup / remove-startup |
-| Auto-DJ | missing | = DJ shuffle option |
-| Spout2 sender (OBS texture share) | ASK OWNER | Third-party dep; brief requires explicit approval — not built |
+| DPAPI token storage | done | |
+| Clip recording → MP4 (MF H.264 + AAC), hotkey R | done | selftest records + re-decodes a file; `wavescope-<timestamp>.mp4` (brief said `spectraviz-`; that predates the product rename — deliberate deviation, flagged) |
+| Multi-monitor companions, one engine | done | one tap + one analysis for every window; companions vsync-off so windows don't stack vblank waits |
+| Tray icon + minimize-to-tray | done | hidden windows stop rendering entirely |
+| Always-on-top toggle | done | T + tray menu |
+| Launch at login (HKCU Run, off by default) | done | |
+| Auto-DJ | done | = DJ shuffle |
+| Spout2 sender (OBS texture share) | ASK OWNER | third-party dep; brief requires explicit approval — not built |
 
 ## Explicitly N/A on desktop
 
-PWA/service worker; `?embed=1` (superseded by always-on-top / future Spout);
-Butterchurn engine; browser capability gating; landing/marketing page;
-reduced-motion fallback (calm mode covers the intent).
+PWA/service worker; `?embed=1` (always-on-top covers the overlay use; Spout
+is the OBS answer, pending approval); Butterchurn engine; browser capability
+gating; landing/marketing page; reduced-motion fallback (calm mode covers
+the intent).

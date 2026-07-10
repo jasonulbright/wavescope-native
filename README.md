@@ -1,15 +1,17 @@
 # WaveScope (native)
 
 A music visualizer built like an instrument, and built like a classic
-Windows app: one C++ source tree, one statically linked .exe, zero runtime
-dependencies. Everything links against OS DLLs only (user32, d2d1, dwrite,
-ole32); `/MT` means no MSVC redistributable, no .NET, no Java, no webview.
-The audit surface is this repo plus Windows.
+Windows app: one C++ source tree, one statically linked exe, OS DLLs plus
+exactly one deliberate dependency (libprojectM for real MilkDrop). The audit
+surface is this repo, Windows, and the pinned projectM build.
 
 This is the native successor to the WaveScope web app (live at
 https://wavescope.signalridgelabs.com, source at
-github.com/jasonulbright/wavescope). Web work is done; all augmentation
-happens here.
+github.com/jasonulbright/wavescope). It matches the web app feature for
+feature — same analysis math, same 34 modes, same 17 GPU shaders, same
+palettes — and adds the things only a desktop app can do: silent WASAPI
+loopback, MP4 clip recording, companion displays from one engine,
+always-on-top, tray, launch at login.
 
 ## Build
 
@@ -17,200 +19,151 @@ happens here.
 build.bat
 ```
 
-Requires Visual Studio 2026 (any edition) for the compiler. Output:
-`WaveScope.exe`, ~200 KB, runs on stock Windows 10/11 forever.
+Requires Visual Studio 2026 (any edition) and the projectM native build at
+`C:\projects\projectm\install-native` (built there via its
+`build-native.bat`; MSVC/Ninja, shared DLL). The batch file:
 
-## What works today
+1. builds and **runs the unit tests** (`src/tests.cpp`) — a red test fails
+   the build;
+2. builds `WaveScope.exe` (`/MT`, no MSVC redistributable needed for the
+   core app);
+3. stages `projectM-4.dll` + `projectM-4-playlist.dll` beside the exe
+   (these two need the VC runtime, present wherever VS or the VC redist is).
 
-- **WASAPI loopback capture**: hears whatever the machine is playing
-  (Spotify desktop included), silently, with no permission dialogs.
-- **Own analysis chain**: Hann window + radix-2 FFT (2048 pt), log-axis
-  sampling, band energies split at 250 Hz / 4 kHz, RMS level, and the same
-  bass-flux beat envelope as the web engine. No FFT library; it's ~60 lines.
-- **Direct2D renderer** with retained-contents phosphor trails (the fade
-  wash technique ports 1:1 from the canvas engine).
-- **All 34 modes ported** (`src/viz_modes.inl`), across five families
-  (spectrum, waveform, particles, geometry, field), faithful to the web
-  math. Plasma and Waterfall use CPU pixel buffers blitted through D2D.
-- **Six trace palettes** (ultramarine, green phosphor, amber CRT, paper
-  white, full spectrum, magma), cycled with `P`.
-- **Real MilkDrop via projectM** (`M` key): libprojectM built for native
-  MSVC runs in a child window with its own WGL/OpenGL 3.3 context layered
-  over the Direct2D surface, fed PCM from the same loopback tap, rendering
-  raw `.milk` presets. `SPACE`/arrows cycle presets while it is active.
-  Bundled starters in `presets/`. Launch with `WaveScope.exe milkdrop` to
-  boot straight into it.
-- **GPU shader engine** (`G` key, `src/shader_host.inl`): three per-pixel
-  fragment shaders (plasma field, warp tunnel, fractal fold) ported 1:1 from
-  the web build's WebGPU modes to GLSL 330, compiled at runtime and drawn as
-  a fullscreen triangle on their own GL context, audio-uniform driven. No new
-  dependency — pure GPU + OS. `SPACE`/arrows cycle shaders, or click `GPU` on
-  the control deck to open a dropdown and pick one directly.
-- HUD, fullscreen toggle, mode + palette cycling.
+## Verify
 
-The core app is one `/MT` static `.exe` (~258 KB) with zero runtime deps.
-projectM is the one deliberate dependency (LGPL-2.1): `projectM-4.dll` +
-`projectM-4-playlist.dll` ship beside the exe (staged by `build.bat`), and
-they need the VC runtime (present wherever VS or the VC redist is installed).
+```
+WaveScope.exe selftest
+```
 
-Keys: `SPACE`/`RIGHT` next (mode or preset), `LEFT` prev, `P` palette,
-`N` palettes + shuffle panel, `1`/`2`/`3` source (loopback/mic/demo),
-`4` open audio file, `S` shuffle timer, `C` calm mode, `R` resolution target,
-`L` MilkDrop preset folder, `M` MilkDrop engine, `G` GPU shader engine,
-`B` Spotify (authorize + play), `F` fullscreen, `H` HUD, `ESC` quit. Settings
-and custom palettes persist to `wavescope.ini`.
+Renders every engine on the demo signal, sweeps all 34 modes and all 17
+shaders, records a 1.6 s MP4 and re-opens it, dumps PNGs of what actually
+rendered beside the exe, writes `wavescope-selftest.log`, and exits nonzero
+on any failure. Run it after every change; CI-in-a-flag.
 
-Launch flags: `demo` (synthetic signal), `file=<path>` (play a file),
-`milkdrop` / `shader` (boot into that engine), `wall` (borderless video wall
-across every display — keys act on the focused window, `ESC` quits all),
-`kiosk` (single borderless full-screen window on the primary display with an
-idle cursor-hide), `install-startup` / `remove-startup` (add/remove the
-launch-at-login entry, then exit). A system-tray icon (right-click →
-Show / Hide / Quit; minimize hides to tray) and MilkDrop preset hot-reload
-(drop `.milk` files into the watched folder and they appear live) round it out.
+## The three engines
 
-projectM is built from `C:\projects\projectm` via `build-native.bat` there
-(MSVC/Ninja, shared DLL, installed to `install-native/`). `build.bat` links
-its import lib and stages the DLLs.
-
-## Feature parity with the web version
-
-The goal is 1:1 with WaveScope (the frozen web v2). Status of every web
-feature:
-
-| Web feature | Native status |
+| Engine | What it is |
 |---|---|
-| 34 built-in modes (5 families) | done |
-| 6 trace palettes | done |
-| MilkDrop, raw `.milk` (projectM) | done (2 bundled presets so far) |
-| System-audio capture | done (WASAPI loopback) |
-| Fullscreen | done |
-| HUD / keyboard control | done (persists over both engines; deck UI pending) |
-| Demo signal source | done (key 3, or `WaveScope demo`) |
-| Microphone source | done (key 2) |
-| Audio-file source | done (key 4, Media Foundation decode + play) |
-| Spotify one-button (PKCE) | done (B / SPOT: authorize once, then play) |
-| Resolution targets (1080-8K) | done (key R; offscreen render + scale) |
-| Shuffle timer | done (key S for modes; palette-shuffle + include list in the N panel) |
-| Calm mode (photosensitivity) | done (key C) |
-| Custom palette creation | done (N panel: 3-stop editor + color picker + naming) |
-| Settings / preset persistence | done (wavescope.ini beside the exe) |
-| projectM preset library | done (scans a folder of .milk; L picks your archive) |
-| GPU shader modes (plasma/tunnel/fractal) | done (G: real GLSL fragment shaders on the GL context) |
-| Multi-monitor (per-display windows) | done (`wall` flag: independent visual per screen) |
-| On-screen control deck (auto-hiding) | done (mouse bottom-bar, all engines) |
-| Shortcuts / help overlay | done (F1 / ? keymap card, all engines) |
-| Landing / marketing page | N/A (desktop app) |
-| Reduced-motion fallback | N/A (desktop) |
+| **WaveScope** | 34 built-in modes in five families (spectrum 9, waveform 6, particles 6, geometry 6, field 7), Direct2D, faithful ports of the web canvas math, phosphor-trail retained rendering. |
+| **GPU** | All 17 web WGSL shader modes ported 1:1 to GLSL 330 (Plasma field … Scope lines), compiled at runtime on a WGL context. Audio uniforms plus per-frame FFT (1024×R8) and waveform (2048×R8) textures with `spec()/specLog()/wav()`. |
+| **projectM / MILK** | Real MilkDrop via native libprojectM: PROJM plays the 15 bundled presets (same files as the web app), MILK plays your own `.milk` folder (`L` to pick, hot-reloads on change). |
 
-## Roadmap (ordered for parity)
+## Sources
 
-1. ~~**Audio input sources.**~~ DONE. Loopback (1), mic (2), demo (3), and
-   audio file (4, Media Foundation decode + WASAPI render + analyze, loops;
-   also `WaveScope.exe file=<path>`). All four switchable at runtime.
-2. ~~**Playback controls.**~~ DONE. Resolution targets (R: AUTO/1080/1440/
-   4K/8K, rendered into an offscreen bitmap then scaled to the window),
-   shuffle timer (S: off/15s/30s/1m/5m, hops modes or projectM presets), calm
-   mode (C: excludes the 5 beat-burst modes + softens the beat envelope).
-   *Palette-shuffle + the per-palette include list are in the N panel (step
-   7), since they need UI.*
-3. ~~**Custom palettes + persistence.**~~ DONE. `N` opens the palettes panel
-   (see step 7) to build a three-stop palette from the standard color picker;
-   it joins the `P` rotation. Settings (mode, palette, resolution, shuffle,
-   calm, palette-shuffle + include list) and custom palettes persist to
-   `wavescope.ini` beside the exe, restored on launch. *Source is
-   intentionally not restored (starts on loopback).*
-4. ~~**projectM preset library.**~~ DONE. Scans a folder of raw `.milk`
-   files and cycles all of them (SPACE/arrows/shuffle); `L` picks your own
-   archive folder; preset name + count shown in the title bar. (Native has
-   no "upload/persist" step — the folder on disk *is* the library.)
-5. ~~**GPU shader modes.**~~ DONE. `G` toggles a GPU shader engine
-   (`src/shader_host.inl`): the three WebGPU shaders (plasma field, warp
-   tunnel, fractal fold) ported 1:1 to GLSL 330 and compiled at runtime,
-   drawn as a fullscreen triangle over its own WGL/OpenGL 3.3 child window —
-   the same host pattern as projectM, so the bitmap-font HUD overlays it too.
-   True per-pixel at window resolution, audio-uniform driven. `SPACE`/arrows
-   cycle shaders, shuffle rotates them, `WaveScope.exe shader` boots into it.
-   Pulls in **no** new dependency (pure GPU + OS, unlike projectM's DLL).
-6. ~~**Multi-monitor.**~~ DONE. `WaveScope.exe wall` spans one borderless
-   window across every display (`EnumDisplayMonitors`), each an independent
-   `App` with its own engine/mode/palette/resolution and its own loopback tap
-   (no cross-window streaming — one process, shared machine audio). It's a
-   video wall: extra screens start on distinct visuals; focus a window to
-   control it (keys act on the focused window); `ESC` on any window quits all.
-   Without the flag it stays a single 1440×900 window as before. *Per-monitor
-   config persistence is a later refinement — today the primary window's setup
-   is what's saved.*
-7. ~~**On-screen control deck.**~~ DONE. `F1` / `?` shows a centered keymap
-   card. The mouse-driven bottom bar reveals when the cursor nears the bottom
-   edge and auto-hides when idle: clickable buttons for source
-   (SYS/MIC/DEMO/FILE), engine (MODES/MILK/GPU), prev/next, palette,
-   resolution, shuffle, calm, HUD, and Spotify — active selections
-   highlighted. **The HUD, deck, and help render identically over every
-   engine.** The UI is drawn once with Direct2D (`src/ui_paint.inl`); the
-   built-in modes draw it straight onto their D2D target, while the
-   projectM/shader engines render that same UI into a WIC bitmap and composite
-   it as a GL texture over the frame — so the controls are crisp DirectWrite
-   everywhere, never an aliased GL font, and never vanish when you switch
-   engines. Mouse input is forwarded from the GL child windows so the deck is
-   clickable there too. The overlay only re-renders/re-uploads when it changes
-   (dirty-checked), so it's cheap even at high resolution.
+`1` system audio (WASAPI loopback — hears whatever the machine plays,
+silently, no permission dialogs), `2` microphone, `3` demo signal
+(oscillator bank + synthetic kick, analysis-only, matches the web spec),
+`4` audio file (Media Foundation decode, audible, looped). The capture
+survives device unplugs and follows Windows default-device changes; silence
+decays to dark instead of freezing.
 
-   **Palettes + shuffle panel DONE** (`N`): a port of the web
-   "PALETTES + SHUFFLE" window — a "shuffle palettes too" toggle, a checklist
-   of every palette (with live gradient previews) controlling the shuffle
-   pool, and a new-palette editor (three color-stop swatches via the standard
-   picker, a live blended preview, a name field, and *add palette*). Drawn
-   through the same painter, so it's crisp over every engine. That closes the
-   last parity items.
-8. ~~**Spotify.**~~ DONE (`src/spotify.inl`). `B` (or the `SPOT` deck button)
-   runs OAuth2 Authorization Code + **PKCE** — no client secret, so nothing
-   sensitive ships in the exe. The browser authorizes once; the redirect to
-   `http://127.0.0.1:8888/callback` is caught on a raw socket (CSRF `state`
-   validated), tokens are fetched over WinHTTP, and the Player API starts
-   playback on your device — which the loopback tap already visualizes. The
-   refresh token is **DPAPI-encrypted** (bound to the Windows user) in
-   `wavescope.ini`, so re-auth is rare. The whole flow runs on a worker
-   thread; the render loop never stalls. The Spotify **client ID lives in
-   `wavescope.ini`** (`[spotify] clientId=…`, seeded on first run) rather than
-   hard-coded, so it's yours to change. *Playback control needs Spotify
-   Premium (the Player endpoints are Premium-only); loopback capture of
-   whatever is already playing needs none of this.*
-9. ~~**Polish.**~~ DONE. System-tray icon (right-click → Show / Hide / Quit;
-   minimize hides to tray), `kiosk` flag (borderless full-screen on the
-   primary display + idle cursor auto-hide), `install-startup` /
-   `remove-startup` launch-at-login toggles (HKCU Run, run deliberately), and
-   MilkDrop preset hot-reload (`FindFirstChangeNotification` on the watched
-   `.milk` folder — dropped/removed presets update the library live).
+Analysis matches the web app's Web Audio analyser exactly — Blackman
+window, |X|/N, 0.8 smoothing on linear magnitudes, [-100,-30] dB mapping,
+Hz-based bands (250 Hz / 4 kHz splits) from the real device sample rate,
+quarter-decimated RMS level, bass-flux beat envelope (1.35× gate, 0.08
+floor, e^-6dt decay). Same music, same numbers, both apps.
 
-## Beyond parity (optional, not required for 1:1)
+## Keys
 
-- **Built-in mini-player.** Once the audio-file source exists (decode + play),
-  grow it into a small player: a queue, transport (play/pause/seek/prev/next),
-  drag-drop, now-playing metadata on screen. Decode via Media Foundation
-  (zero new deps; covers MP3/AAC/WAV/FLAC on Win10+); reach for the
-  single-header **miniaudio** (MIT-0) only if MF's format coverage or
-  ergonomics get annoying. Deliberately NOT a foobar2000-class library
-  manager (that's a different product; the loopback source already lets any
-  external player feed the visuals). foobar2000 itself is closed source, so
-  it can't be embedded.
-- **No built-in playback EQ.** Point EQ-wanting users at Equalizer APO
-  (open source, system-wide) + the loopback source, which visualizes the
-  post-EQ output for free. A *visual-only* band-tilt knob (weights the
-  analysis bands without touching the audio) is the only EQ-ish thing worth
-  considering here.
+| Key | Action |
+|---|---|
+| `SPACE` / `→` | next mode / preset / shader |
+| `←` | previous |
+| `E` | cycle engine (WaveScope → GPU → projectM) |
+| `G` | GPU shader engine |
+| `P` | cycle trace palette |
+| `N` | palettes + shuffle panel (include list, 3-stop editor) |
+| `1 2 3 4` | source: system / mic / demo / file picker |
+| `M` | displays menu (move to a monitor, ALL DISPLAYS companions) |
+| `R` | record clip → `wavescope-<timestamp>.mp4` (H.264 + AAC) |
+| `B` | Spotify: authorize once + start playback (Premium) |
+| `S` | shuffle timer (off / 15s / 30s / 1m / 5m / **DJ**) |
+| `C` | calm mode (photosensitive-safe: no burst modes, softened beat) |
+| `L` | MilkDrop preset folder |
+| `T` | always on top |
+| `F` | fullscreen — `H` HUD — `F1` / `?` help |
+| `ESC` | close panel / menu / help / fullscreen, then quit |
+
+Resolution targets (AUTO / 1080 / 1440 / 4K / 8K) live in the deck's
+`RES ▾` dropdown. The deck reveals when the mouse nears the bottom edge and
+hides after 3 s idle. DJ shuffle hops engine AND visual every 30 s.
+
+## Recording
+
+`R` starts/stops an MP4 beside the exe: hardware H.264 where available plus
+AAC of the analysed audio, via Media Foundation (no new dependencies). It
+captures the engine's render target *before* the UI, at the current render
+resolution (built-ins) or window size (GL engines). Switching engine or
+resolution mid-take finalizes the file cleanly. `● REC mm:ss` shows in the
+HUD.
+
+## Displays
+
+`M` opens the displays menu: move the window to any monitor, or
+**ALL DISPLAYS** to open a borderless companion on every other screen — all
+driven by the one audio engine (one capture, one analysis; the web app
+needs BroadcastChannel + PCM streaming for this). Each companion keeps its
+own engine/mode/palette: focus it and use the normal keys; `Esc` closes
+just that companion. `WaveScope.exe wall` boots straight into that state;
+`kiosk` is a single borderless fullscreen with idle cursor-hide.
+
+## Spotify
+
+`B` runs OAuth2 Authorization Code + PKCE (no client secret; the client ID
+lives in `wavescope.ini`, yours to change). The loopback listener binds
+127.0.0.1:8888 exclusively *before* the browser opens, validates the CSRF
+`state`, and never echoes attacker-controlled input. Tokens travel over
+WinHTTP (schannel); the refresh token is DPAPI-encrypted at rest. After
+connecting, playback starts on your device (Premium required for control —
+capture of already-playing audio needs nothing) and the HUD shows
+now-playing (`♪ track — artist`), silently resumed on later launches.
+
+## Persistence
+
+`wavescope.ini` beside the exe: mode, engine (incl. MILK library folder),
+palette + custom palettes, resolution, shuffle (incl. include-list), calm,
+window placement, Spotify client ID + DPAPI-wrapped refresh token. The
+primary window's setup is what persists; source intentionally resets to
+loopback each launch.
+
+## Launch flags
+
+`demo` · `file=<path>` · `milkdrop` · `shader` · `wall` · `kiosk` ·
+`install-startup` / `remove-startup` (HKCU Run key, off by default) ·
+`selftest`. Tray icon: right-click for Show/Hide, Always on top, Quit;
+minimize hides to tray (and rendering fully stops while hidden).
 
 ## Source map
 
-- `src/main.cpp` — infrastructure (classic single-file style):
-  - `AudioTap` — WASAPI loopback thread, ring buffer, FFT, `AudioFrame`
-  - `Hsla()` / `BinLog()` — color + log-FFT helpers
-  - `App` — window, D2D target, render loop, fullscreen, mode/palette state
-- `src/viz_modes.inl` — the visualization library (included by main.cpp):
-  - `PALETTES[]` — the six trace palettes
-  - `DrawCtx` — the Direct2D primitives (rects, lines, circles, filled and
-    stroked paths, transforms, CPU-buffer blit) mirroring the web `VizPaint`
-  - `MODES[]` — the 34 modes; each is `void draw(DrawCtx&)`
-- `src/projectm_host.inl` — the MilkDrop engine host (included by main.cpp):
-  - `ProjectMHost` — child GL window, WGL 3.3 context bootstrap, the
-    projectM instance, PCM feed, `.milk` preset load/cycle
+- `src/analysis.inl` — the pure math shared with the tests: `AudioFrame`,
+  HSL, `BinLog`, radix-2 FFT, `AnalyzeWindow` (the analyser contract).
+- `src/main.cpp` — infrastructure: `AudioTap` (WASAPI loopback/mic thread,
+  ring buffer, file playback, device-change + silence handling, per-consumer
+  `ReadNew` cursors), `App` (window, D2D, deck/HUD/panel UI, engines,
+  persistence), companion windows, tray, message loop.
+- `src/viz_modes.inl` — palettes, `DrawCtx`, `VizState` (per-window mode
+  state), all 34 modes.
+- `src/shader_host.inl` — the GPU engine: WGL host, 17 GLSL ports, audio
+  textures.
+- `src/projectm_host.inl` — the MilkDrop engine host: WGL host, libprojectM,
+  preset scan/sort/hot-reload.
+- `src/spotify.inl` — PKCE flow, loopback listener, WinHTTP, DPAPI tokens,
+  now-playing poller.
+- `src/record.inl` — MP4 clip recorder (Media Foundation SinkWriter).
+- `src/ui_paint.inl` — the abstract UI painter (one UI, every engine).
+- `src/selftest.inl` — the `selftest` harness.
+- `src/tests.cpp` — unit tests for the pure math (run by `build.bat`).
+
+## Dependencies
+
+See `DEPENDENCIES.md` for the full decision table. Short version: OS
+facilities everywhere they exist (WinHTTP, DPAPI, bcrypt, Media Foundation,
+WASAPI, D2D/DirectWrite/WIC, WGL), one vendored dependency (libprojectM
+4.x, LGPL-2.1, pinned, built from `C:\projects\projectm`), and small
+hand-rolled code only where it is boring and testable (ini, flat JSON
+reads, base64url) — with the FFT and analysis pinned by unit tests.
+
+`FINDINGS.md` records the adversarial review this codebase went through;
+`PARITY.md` tracks the feature matrix against the web app;
+`DEMO-CHECKLIST.md` is the 5-minute walkthrough script.
