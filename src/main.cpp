@@ -614,6 +614,17 @@ static int Clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v
 // Appends each display's bounding rect (defined after App, used by DisplayRects).
 static BOOL CALLBACK CollectMonitor(HMONITOR mon, HDC dc, LPRECT rc, LPARAM lp);
 
+// ONE audio engine for the whole process: every window (primary + companion
+// displays) renders from the same tap — one loopback capture, one FFT, one
+// beat state, analyzed once per loop. This is the desktop's structural win
+// over the web app's BroadcastChannel + PCM streaming.
+static AudioTap g_tap;
+
+// Companion-window bookkeeping (defined near wWinMain).
+static bool g_companionsOpen = false;
+static void OpenCompanions(HINSTANCE inst);
+static void CloseCompanions();
+
 struct App {
     HWND hwnd = nullptr;
     ID2D1Factory* d2d = nullptr;
@@ -623,7 +634,7 @@ struct App {
     IDWriteTextFormat* hudFont = nullptr;
     IDWriteTextFormat* deckFont = nullptr;   // centered, for deck buttons
     IDWriteTextFormat* tinyFont = nullptr;   // small, right-aligned group descriptors
-    AudioTap tap;
+    bool isCompanion = false;   // extra-display window: closable on its own
     HINSTANCE inst = nullptr;
     ProjectMHost pmHost;
     bool pmActive = false;
@@ -854,7 +865,7 @@ struct App {
             EnsureOffscreen(rc.right, rc.bottom);
             w = (int)offW; h = (int)offH;
         }
-        if (!rec.Start(w, h, tap.SampleRate(), &tap))
+        if (!rec.Start(w, h, g_tap.SampleRate(), &g_tap))
             SetWindowTextW(hwnd, L"WaveScope  (recording failed to start)");
     }
 
@@ -909,7 +920,16 @@ struct App {
         return dpi ? (float)dpi / 96.0f : 1.0f;
     }
 
+    // Single-window path (selftest): analyze here, then render.
     void Render() {
+        AudioFrame frame;
+        g_tap.Analyze(frame, Now());
+        RenderFrame(frame);
+    }
+
+    // Render one frame from the shared analysis (by value: calm mode tames
+    // the beat per-window without touching the other windows' copy).
+    void RenderFrame(AudioFrame frame) {
         if (!rt) return;
         D2D1_SIZE_F size = rt->GetSize();
         float now = Now();
@@ -928,8 +948,6 @@ struct App {
             if (shufflePalettes) paletteIdx = PickRandomIncludedPalette();
         }
 
-        AudioFrame frame;
-        tap.Analyze(frame, now);
         if (calm) frame.beat *= 0.2f; // photosensitivity: tame the pulse
 
         // Auto-hide the deck after 3 s idle (web parity); an open dropdown
@@ -961,11 +979,11 @@ struct App {
             // swprintf_s would abort the process if a long name didn't fit.
             wchar_t l1[512];
             _snwprintf_s(l1, _TRUNCATE, L"SRC %s\n%s %s\nRES %s\nFPS %d%s",
-                       tap.SourceName(), milkMode ? L"MILK" : L"PROJM", pmHost.PresetName(),
+                       g_tap.SourceName(), milkMode ? L"MILK" : L"PROJM", pmHost.PresetName(),
                        RES_OPTS[resIdx].name, fps, extra);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             float pcm[4800];   // up to 100 ms of new samples per frame
-            int newN = tap.ReadNew(pmCursor, pcm, 4800);
+            int newN = g_tap.ReadNew(pmCursor, pcm, 4800);
             pmHost.RenderEngine(pcm, newN);
             if (pmHost.lost == 0) {
                 if (rec.Active()) {   // pre-UI frame for the clip
@@ -988,7 +1006,7 @@ struct App {
         if (shaderActive && shaderHost.ready) {
             wchar_t l1[512];
             _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nGPU %s\nRES %s\nFPS %d%s",
-                       tap.SourceName(), shaderHost.ShaderName(shaderIdx), RES_OPTS[resIdx].name, fps, extra);
+                       g_tap.SourceName(), shaderHost.ShaderName(shaderIdx), RES_OPTS[resIdx].name, fps, extra);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             shaderHost.RenderEngine(shaderIdx, frame);
             if (shaderHost.lost == 0) {
@@ -1075,7 +1093,7 @@ struct App {
 
         wchar_t l1[512];
         _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nMODE %s  (%02d/%d)\nRES %s\nFPS %d%s%s",
-                   tap.SourceName(), mode.name, modeIdx + 1, MODE_COUNT,
+                   g_tap.SourceName(), mode.name, modeIdx + 1, MODE_COUNT,
                    RES_OPTS[resIdx].name, fps, calm ? L"   CALM" : L"", extra);
         float sc = UiScale();
         rt->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc));
@@ -1246,10 +1264,10 @@ struct App {
     // Is a button currently the active selection (for highlight)?
     bool DeckActive(int i) {
         switch (i) {
-        case DK_SYS:   return tap.Source() == AudioTap::SRC_LOOPBACK;
-        case DK_MIC:   return tap.Source() == AudioTap::SRC_MIC;
-        case DK_DEMO:  return tap.Source() == AudioTap::SRC_DEMO;
-        case DK_FILE:  return tap.Source() == AudioTap::SRC_FILE;
+        case DK_SYS:   return g_tap.Source() == AudioTap::SRC_LOOPBACK;
+        case DK_MIC:   return g_tap.Source() == AudioTap::SRC_MIC;
+        case DK_DEMO:  return g_tap.Source() == AudioTap::SRC_DEMO;
+        case DK_FILE:  return g_tap.Source() == AudioTap::SRC_FILE;
         case DK_SPOT:  return g_spotify.busy.load();
         case DK_WAVE:  return !pmActive && !shaderActive;
         case DK_GPU:   return shaderActive;
@@ -1268,9 +1286,9 @@ struct App {
     void DeckDispatch(int i) {
         int prev = deckMenu; deckMenu = -1;   // any click closes an open dropdown by default
         switch (i) {
-        case DK_SYS:   tap.SetSource(AudioTap::SRC_LOOPBACK); break;
-        case DK_MIC:   tap.SetSource(AudioTap::SRC_MIC); break;
-        case DK_DEMO:  tap.SetSource(AudioTap::SRC_DEMO); break;
+        case DK_SYS:   g_tap.SetSource(AudioTap::SRC_LOOPBACK); break;
+        case DK_MIC:   g_tap.SetSource(AudioTap::SRC_MIC); break;
+        case DK_DEMO:  g_tap.SetSource(AudioTap::SRC_DEMO); break;
         case DK_FILE:  OpenFile(); break;
         case DK_SPOT:  g_spotify.OneButton(); break;
         case DK_PREV:  CyclePick(-1); break;
@@ -1368,7 +1386,7 @@ struct App {
         case DK_TRACE: return PaletteCount();
         case DK_SHUF:  return SHUFFLE_COUNT;
         case DK_RES:   return RES_COUNT;
-        case DK_DISP:  return DisplayCount();
+        case DK_DISP:  return DisplayCount() + 1;   // + ALL DISPLAYS toggle
         }
         return 0;
     }
@@ -1379,7 +1397,10 @@ struct App {
         case DK_TRACE: return PalNameFor(i);
         case DK_SHUF:  return SHUF_LABELS[i];
         case DK_RES:   return RES_OPTS[i].name;
-        case DK_DISP:  swprintf_s(buf, L"DISPLAY %d", i + 1); return buf;
+        case DK_DISP:
+            if (i >= DisplayCount())
+                return g_companionsOpen ? L"CLOSE EXTRA DISPLAYS" : L"ALL DISPLAYS";
+            swprintf_s(buf, L"DISPLAY %d", i + 1); return buf;
         }
         return L"";
     }
@@ -1406,7 +1427,13 @@ struct App {
         case DK_TRACE: paletteIdx = i; break;
         case DK_SHUF:  SetShuffle(i); break;
         case DK_RES:   resIdx = i; break;
-        case DK_DISP:  MoveToMonitor(i); break;
+        case DK_DISP:
+            if (i >= DisplayCount()) {
+                if (g_companionsOpen) CloseCompanions(); else OpenCompanions(inst);
+            } else {
+                MoveToMonitor(i);
+            }
+            break;
         }
     }
     // Lay the open dropdown out above its anchor button, wrapping into columns
@@ -1608,7 +1635,7 @@ struct App {
         ofn.lpstrFile = file;
         ofn.nMaxFile = MAX_PATH;
         ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-        if (GetOpenFileNameW(&ofn)) tap.SetFile(file);
+        if (GetOpenFileNameW(&ofn)) g_tap.SetFile(file);
     }
 
     // Point the projectM engine at a folder of .milk presets.
@@ -1640,6 +1667,7 @@ struct App {
         shaderHost.Destroy();
         RECT rc; GetClientRect(hwnd, &rc);
         if (wantPm && pmHost.Init(inst, hwnd)) {
+            if (isCompanion) pmHost.SetVsync(false);
             pmHost.Resize(rc.right, rc.bottom);
             if (milkMode && !libraryFolder.empty()) pmHost.SetPresetFolder(libraryFolder.c_str());
             pmHost.Show(true);
@@ -1647,6 +1675,7 @@ struct App {
             pmActive = false;
         }
         if (wantShader && shaderHost.Init(inst, hwnd)) {
+            if (isCompanion) shaderHost.SetVsync(false);
             shaderHost.Resize(rc.right, rc.bottom);
             shaderHost.Show(true);
         } else if (wantShader) {
@@ -1662,6 +1691,7 @@ struct App {
                 SetWindowTextW(hwnd, L"WaveScope  (projectM failed to start)");
                 return;
             }
+            if (isCompanion) pmHost.SetVsync(false);
             RECT rc; GetClientRect(hwnd, &rc);
             pmHost.Resize(rc.right, rc.bottom);
             pmHost.Show(true);
@@ -1682,6 +1712,7 @@ struct App {
                 SetWindowTextW(hwnd, L"WaveScope  (GPU shaders failed to start)");
                 return;
             }
+            if (isCompanion) shaderHost.SetVsync(false);
             RECT rc; GetClientRect(hwnd, &rc);
             shaderHost.Resize(rc.right, rc.bottom);
             shaderHost.Show(true);
@@ -1939,6 +1970,7 @@ struct App {
     std::wstring ConfigPath() const { return PmExeDir() + L"wavescope.ini"; }
 
     void SaveConfig() {
+        if (isCompanion) return;   // only the primary window's setup persists
         std::wstring path = ConfigPath();
         AcquireSRWLockExclusive(&g_iniLock);   // vs. the Spotify worker's SaveToken
         auto wi = [&](const wchar_t* k, int v) {
@@ -2041,13 +2073,13 @@ struct App {
         EnsurePalInclude(); // new palettes default to included
     }
 
-    // Release everything this window owns (GL hosts, audio tap, D2D).
+    // Release everything this window owns (GL hosts, D2D). The audio tap is
+    // global and outlives the windows.
     void Shutdown() {
         rec.Stop();
         ReleaseRecOffscreen();
         shaderHost.Destroy();
         pmHost.Destroy();
-        tap.Stop();
         ReleaseOffscreen();
         ReleaseOverlay();
         SafeRelease(&wic);
@@ -2195,9 +2227,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case 'P':      a->CyclePalette(); break;
         case 'N':      a->OpenPalettePanel(); break;
-        case '1':      a->tap.SetSource(AudioTap::SRC_LOOPBACK); break;
-        case '2':      a->tap.SetSource(AudioTap::SRC_MIC); break;
-        case '3':      a->tap.SetSource(AudioTap::SRC_DEMO); break;
+        case '1':      g_tap.SetSource(AudioTap::SRC_LOOPBACK); break;
+        case '2':      g_tap.SetSource(AudioTap::SRC_MIC); break;
+        case '3':      g_tap.SetSource(AudioTap::SRC_DEMO); break;
         case '4':      a->OpenFile(); break;
         case 'S':      a->CycleShuffle(); break;
         case 'C':      a->SetCalm(!a->calm); break;
@@ -2216,11 +2248,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case VK_OEM_2: if (GetKeyState(VK_SHIFT) & 0x8000) a->help = !a->help; break; // '?'
         case VK_ESCAPE:
             // Web-style restore chain: panel -> open dropdown -> help ->
-            // fullscreen -> quit.
+            // fullscreen -> (companion: close it) -> quit.
             if (a->palPanel) a->palPanel = false;
             else if (a->deckMenu >= 0) a->deckMenu = -1;
             else if (a->help) a->help = false;
-            else if (a->fullscreen) a->ToggleFullscreen();
+            else if (a->fullscreen && !a->isCompanion) a->ToggleFullscreen();
+            else if (a->isCompanion) DestroyWindow(hwnd);
             else PostQuitMessage(0);
             break;
         }
@@ -2254,10 +2287,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if ((wp & 0xFFF0) == SC_MINIMIZE && g_trayAdded) { ShowWindow(hwnd, SW_HIDE); return 0; }
         break;  // other syscommands fall through to DefWindowProc
     case WM_CLOSE:
-        a->SaveConfig();   // capture placement while the window still exists
+        if (!a->isCompanion) a->SaveConfig(); // capture placement while alive
         break;             // DefWindowProc destroys the window
     case WM_DESTROY:
-        PostQuitMessage(0);
+        if (!a->isCompanion) {
+            PostQuitMessage(0);
+            return 0;
+        }
+        // A companion closes alone: unhook, free, and update the toggle.
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        for (size_t i = 0; i < g_views.size(); i++)
+            if (g_views[i] == a) { g_views.erase(g_views.begin() + i); break; }
+        a->Shutdown();
+        delete a;
+        g_companionsOpen = false;
+        for (App* v : g_views) g_companionsOpen |= v->isCompanion;
         return 0;
     }
     return DefWindowProc(hwnd, msg, wp, lp);
@@ -2283,7 +2327,6 @@ static App* CreateView(HINSTANCE inst, const wchar_t* cls, RECT rc, bool borderl
         delete v;
         return nullptr;
     }
-    v->tap.Start();
     v->LoadConfig();
     // Restore the saved placement (normal windows only, and only when the
     // saved rect still lands on a live monitor).
@@ -2307,6 +2350,38 @@ static BOOL CALLBACK CollectMonitor(HMONITOR mon, HDC, LPRECT, LPARAM lp) {
     MONITORINFO mi = { sizeof(MONITORINFO) };
     if (GetMonitorInfoW(mon, &mi)) rects->push_back(mi.rcMonitor);
     return TRUE;
+}
+
+// Open one borderless companion window on every monitor the primary window
+// is NOT on — all fed by the one global tap, each with its own visual
+// (distinct starting mode/palette, focus a window to control it, Esc closes
+// just that companion).
+static void OpenCompanions(HINSTANCE inst) {
+    if (g_views.empty()) return;
+    App* prim = g_views[0];
+    MONITORINFO pmi = { sizeof(MONITORINFO) };
+    GetMonitorInfoW(MonitorFromWindow(prim->hwnd, MONITOR_DEFAULTTONEAREST), &pmi);
+    std::vector<RECT> rects;
+    EnumDisplayMonitors(nullptr, nullptr, CollectMonitor, (LPARAM)&rects);
+    int made = 0;
+    for (const RECT& r : rects) {
+        if (EqualRect(&r, &pmi.rcMonitor)) continue;
+        App* v = CreateView(inst, L"WaveScopeWindow", r, true, SW_SHOW);
+        if (!v) continue;
+        v->isCompanion = true;
+        made++;
+        v->modeIdx = (prim->modeIdx + 5 * made) % MODE_COUNT;
+        v->paletteIdx = (prim->paletteIdx + made) % v->PaletteCount();
+    }
+    if (made > 0) g_companionsOpen = true;
+    SetForegroundWindow(prim->hwnd);
+}
+
+static void CloseCompanions() {
+    // DestroyWindow -> WM_DESTROY erases each from g_views and frees it.
+    for (int i = (int)g_views.size() - 1; i >= 0; i--)
+        if (g_views[i]->isCompanion) DestroyWindow(g_views[i]->hwnd);
+    g_companionsOpen = false;
 }
 
 // Parsed command line: whole-token flags only, so a path like
@@ -2363,40 +2438,31 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     wc.lpszClassName = L"WaveScopeWindow";
     RegisterClassW(&wc);
 
-    // "wall" spreads one borderless window across every display (video wall).
+    // "wall" fills every display: a borderless primary on the first monitor
+    // plus companion windows on the rest, all driven by the one tap.
     // "kiosk" is a single borderless full-screen window on the primary display
     // with an idle cursor-hide. Otherwise a single 1440x900 window.
     bool wall = opts.wall;
     bool kiosk = opts.kiosk;
     g_borderless = wall || kiosk;
-    std::vector<RECT> monitors;
-    if (wall) {
-        EnumDisplayMonitors(nullptr, nullptr, CollectMonitor, (LPARAM)&monitors);
-    } else if (kiosk) {
+    g_tap.Start();
+    RECT primaryRect = { CW_USEDEFAULT, CW_USEDEFAULT,
+                         CW_USEDEFAULT + 1440, CW_USEDEFAULT + 900 };
+    if (wall || kiosk) {
         MONITORINFO mi = { sizeof(MONITORINFO) };
         if (GetMonitorInfoW(MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), &mi))
-            monitors.push_back(mi.rcMonitor);
+            primaryRect = mi.rcMonitor;
     }
-    if (monitors.empty()) monitors.push_back(RECT{ CW_USEDEFAULT, CW_USEDEFAULT,
-                                                   CW_USEDEFAULT + 1440, CW_USEDEFAULT + 900 });
-
-    for (size_t i = 0; i < monitors.size(); i++) {
-        App* v = CreateView(hInstance, wc.lpszClassName, monitors[i], g_borderless, nCmdShow);
-        if (!v) { if (i == 0) return 1; else continue; }
-        // Video wall: give each extra screen a distinct starting visual.
-        if (wall && i > 0) {
-            v->modeIdx = (v->modeIdx + (int)i * 5) % MODE_COUNT;
-            v->paletteIdx = (v->paletteIdx + (int)i) % v->PaletteCount();
-        }
-    }
-    if (g_views.empty()) return 1;
+    if (!CreateView(hInstance, wc.lpszClassName, primaryRect, g_borderless, nCmdShow))
+        return 1;
+    if (wall) OpenCompanions(hInstance);
     TrayAdd(g_views[0]->hwnd); // one tray icon for the app (primary window)
 
     // Command-line, applied to every window: "demo" synthetic signal,
     // "file=<path>" playback, "milkdrop"/"shader" boot into those engines.
     for (App* v : g_views) {
-        if (opts.demo) v->tap.SetSource(AudioTap::SRC_DEMO);
-        if (!opts.file.empty()) v->tap.SetFile(opts.file.c_str());
+        if (opts.demo) g_tap.SetSource(AudioTap::SRC_DEMO);
+        if (!opts.file.empty()) g_tap.SetFile(opts.file.c_str());
         if (opts.milkdrop) v->ToggleProjectM();
         if (opts.shader) v->ToggleShader();
     }
@@ -2418,11 +2484,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         return rc;
     }
 
-    // Render loop. GL engines vsync via wglSwapInterval; the D2D path does
-    // NOT block on present under DWM composition, so pace it with DwmFlush.
-    // Hidden/minimized windows are skipped entirely — a tray-hidden
-    // visualizer must cost ~nothing — and with no visible window the loop
-    // parks in MsgWaitForMultipleObjects instead of spinning.
+    // Render loop. Analysis runs ONCE per iteration on the shared tap; every
+    // visible window renders from the same frame. Pacing: the primary GL
+    // engine vsyncs via wglSwapInterval; companions run with vsync off so N
+    // windows never stack N vblank waits; if no vsynced GL present happened,
+    // pace with DwmFlush (the D2D path does not block under DWM). Hidden/
+    // minimized windows are skipped — a tray-hidden visualizer costs
+    // ~nothing — and with no visible window the loop parks in
+    // MsgWaitForMultipleObjects instead of spinning.
     MSG msg = {};
     for (;;) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -2430,19 +2499,22 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
-        bool rendered = false, glPresented = false;
+        AudioFrame frame;
+        g_tap.Analyze(frame, g_views[0]->Now());
+        bool rendered = false, vsyncedGl = false;
         for (App* v : g_views) {
             if (!IsWindowVisible(v->hwnd) || IsIconic(v->hwnd)) continue;
-            v->Render();
+            v->RenderFrame(frame);
             if (v->pmHost.ready) v->pmHost.PollReload(); // hot-reload .milk folder
             rendered = true;
-            glPresented |= (v->pmActive && v->pmHost.ready) ||
-                           (v->shaderActive && v->shaderHost.ready);
+            bool gl = (v->pmActive && v->pmHost.ready) ||
+                      (v->shaderActive && v->shaderHost.ready);
+            vsyncedGl |= gl && !v->isCompanion;
         }
         if (!rendered)
             MsgWaitForMultipleObjects(0, nullptr, FALSE, 100, QS_ALLINPUT);
-        else if (!glPresented)
-            DwmFlush(); // pace the D2D-only frame to the compositor clock
+        else if (!vsyncedGl)
+            DwmFlush(); // pace the frame to the compositor clock
         UpdateCursorHide(g_views[0]->Now());
     }
 done:
@@ -2452,5 +2524,6 @@ done:
     TrayRemove();
     for (App* v : g_views) { v->Shutdown(); delete v; }
     g_views.clear();
+    g_tap.Stop();
     return 0;
 }

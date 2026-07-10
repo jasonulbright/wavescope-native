@@ -165,8 +165,8 @@ static int RunSelfTest(App* v) {
         }
     };
     int rc = 0;
-    v->tap.SetSource(AudioTap::SRC_DEMO);
-    out(L"selftest: source=%s sampleRate=%u", v->tap.SourceName(), v->tap.SampleRate());
+    g_tap.SetSource(AudioTap::SRC_DEMO);
+    out(L"selftest: source=%s sampleRate=%u", g_tap.SourceName(), g_tap.SampleRate());
 
     // --- built-in D2D modes ---
     if (v->pmActive) v->ToggleProjectM();
@@ -243,7 +243,7 @@ static int RunSelfTest(App* v) {
         for (int c = 0; c < 3; c++) {
             v->shaderIdx = capIdx[c] % v->shaderHost.ShaderCount();
             for (int i = 0; i < 40; i++) { pump(); v->Render(); }
-            AudioFrame f; v->tap.Analyze(f, v->Now());
+            AudioFrame f; g_tap.Analyze(f, v->Now());
             v->shaderHost.RenderEngine(v->shaderIdx, f);   // render, don't present
             std::vector<uint8_t> px; int w = 0, h = 0;
             bool cap = v->shaderHost.ReadBack(px, w, h);
@@ -266,7 +266,7 @@ static int RunSelfTest(App* v) {
     } else {
         for (int i = 0; i < 60; i++) { pump(); v->Render(); }
         float pcm[4800];
-        int n = v->tap.ReadNew(v->pmCursor, pcm, 4800);
+        int n = g_tap.ReadNew(v->pmCursor, pcm, 4800);
         v->pmHost.RenderEngine(pcm, n);
         std::vector<uint8_t> px; int w = 0, h = 0;
         bool cap = v->pmHost.ReadBack(px, w, h);

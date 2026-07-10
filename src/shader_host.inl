@@ -492,6 +492,15 @@ struct ShaderHost {
     PFN_glGenVertexArrays p_GenVertexArrays = nullptr;
     PFN_glBindVertexArray2 p_BindVertexArray = nullptr;
     PFN_glActiveTexture p_ActiveTexture = nullptr;
+    PFNWGLSWAPINTERVALEXTPROC p_SwapInterval = nullptr;
+
+    // Companion windows present unsynced so N windows don't stack N vblank
+    // waits on the one render thread.
+    void SetVsync(bool on) {
+        if (!ready || !p_SwapInterval) return;
+        wglMakeCurrent(dc, glrc);
+        p_SwapInterval(on ? 1 : 0);
+    }
 
     static LRESULT CALLBACK ChildProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         // Forward mouse input to the parent so the shared control deck is
@@ -611,8 +620,8 @@ struct ShaderHost {
             glrc = legacy;
         }
 
-        auto swapInterval = (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
-        if (swapInterval) swapInterval(1);
+        p_SwapInterval = (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
+        if (p_SwapInterval) p_SwapInterval(1);
 
         LoadGL(p_CreateShader, "glCreateShader");
         LoadGL(p_ShaderSource, "glShaderSource");

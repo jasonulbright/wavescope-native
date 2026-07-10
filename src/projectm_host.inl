@@ -73,6 +73,15 @@ struct ProjectMHost {
     int cw = 1, ch = 1;       // child client size, for the HUD ortho
     PFN_glUseProgram p_glUseProgram = nullptr;
     PFN_glBindVertexArray p_glBindVertexArray = nullptr;
+    PFNWGLSWAPINTERVALEXTPROC p_SwapInterval = nullptr;
+
+    // Companion windows present unsynced so N windows don't stack N vblank
+    // waits on the one render thread.
+    void SetVsync(bool on) {
+        if (!ready || !p_SwapInterval) return;
+        wglMakeCurrent(dc, glrc);
+        p_SwapInterval(on ? 1 : 0);
+    }
 
     static LRESULT CALLBACK ChildProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         // Forward mouse input to the parent so the shared control deck is
@@ -137,8 +146,8 @@ struct ProjectMHost {
             glrc = legacy;
         }
 
-        auto swapInterval = (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
-        if (swapInterval) swapInterval(1); // vsync, so the GL loop doesn't spin
+        p_SwapInterval = (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
+        if (p_SwapInterval) p_SwapInterval(1); // vsync, so the GL loop doesn't spin
 
         p_glUseProgram = (PFN_glUseProgram)wglGetProcAddress("glUseProgram");
         p_glBindVertexArray = (PFN_glBindVertexArray)wglGetProcAddress("glBindVertexArray");
