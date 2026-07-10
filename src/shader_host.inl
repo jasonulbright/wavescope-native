@@ -132,9 +132,9 @@ struct ShaderHost {
     HDC dc = nullptr;
     HGLRC glrc = nullptr;
     GLuint vao = 0;
-    ShaderProg progs[3] = {};
+    ShaderProg progs[SV_COUNT] = {};
     bool ready = false;
-    GLuint fontBase = 0;
+    int lost = 0;             // consecutive wglMakeCurrent failures (GPU reset)
     GLuint overlayTex = 0;    // UI overlay uploaded from the D2D-rendered bitmap
     int overlayW = 0, overlayH = 0;
     int cw = 1, ch = 1;
@@ -280,15 +280,6 @@ struct ShaderHost {
 
         p_GenVertexArrays(1, &vao);
 
-        HFONT font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET,
-                                 OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                                 FIXED_PITCH | FF_MODERN, L"Consolas");
-        HFONT oldFont = (HFONT)SelectObject(dc, font);
-        fontBase = glGenLists(256);
-        wglUseFontBitmapsW(dc, 0, 256, fontBase);
-        SelectObject(dc, oldFont);
-        DeleteObject(font);
-
         cw = rc.right > 0 ? rc.right : 1;
         ch = rc.bottom > 0 ? rc.bottom : 1;
 
@@ -318,7 +309,8 @@ struct ShaderHost {
         idx = (idx % SV_COUNT + SV_COUNT) % SV_COUNT;
         ShaderProg& s = progs[idx];
         if (!s.prog) return;
-        wglMakeCurrent(dc, glrc);
+        if (!wglMakeCurrent(dc, glrc)) { lost++; return; }  // GPU reset/TDR
+        lost = 0;
         glViewport(0, 0, cw, ch);
         glClearColor(0.043f, 0.051f, 0.047f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -353,12 +345,16 @@ struct ShaderHost {
         glBindTexture(GL_TEXTURE_2D, overlayTex);
         if (dirty && bgra && tw > 0 && th > 0) {
             glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, bgra);
-            overlayW = tw; overlayH = th;
+            if (tw != overlayW || th != overlayH) {   // (re)allocate on resize only
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, bgra);
+                overlayW = tw; overlayH = th;
+            } else {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, th, GL_BGRA_EXT, GL_UNSIGNED_BYTE, bgra);
+            }
         }
         if (overlayW <= 0) { glDisable(GL_TEXTURE_2D); return; }
         glEnable(GL_BLEND);
@@ -397,7 +393,9 @@ struct ShaderHost {
     void Destroy() {
         if (glrc) wglMakeCurrent(dc, glrc);
         if (overlayTex) { glDeleteTextures(1, &overlayTex); overlayTex = 0; }
-        if (fontBase && glrc) { glDeleteLists(fontBase, 256); fontBase = 0; }
+        overlayW = overlayH = 0;
+        lost = 0;
+        for (ShaderProg& p : progs) p = ShaderProg{};
         if (glrc) { wglMakeCurrent(nullptr, nullptr); wglDeleteContext(glrc); glrc = nullptr; }
         if (child && dc) ReleaseDC(child, dc);
         if (child) DestroyWindow(child);

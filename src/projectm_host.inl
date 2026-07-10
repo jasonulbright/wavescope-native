@@ -9,6 +9,7 @@
 #include <projectM-4/projectM.h>
 #include <GL/gl.h>
 #include <shlobj.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -66,7 +67,7 @@ struct ProjectMHost {
     HANDLE presetWatch = nullptr;     // hot-reload change notification
     int presetIdx = 0;
     bool ready = false;
-    GLuint fontBase = 0;      // wglUseFontBitmaps display-list base for the HUD
+    int lost = 0;             // consecutive wglMakeCurrent failures (GPU reset)
     GLuint overlayTex = 0;    // UI overlay uploaded from the D2D-rendered bitmap
     int overlayW = 0, overlayH = 0;
     int cw = 1, ch = 1;       // child client size, for the HUD ortho
@@ -142,15 +143,6 @@ struct ProjectMHost {
         p_glUseProgram = (PFN_glUseProgram)wglGetProcAddress("glUseProgram");
         p_glBindVertexArray = (PFN_glBindVertexArray)wglGetProcAddress("glBindVertexArray");
 
-        // Build a bitmap font for the HUD from a GDI font.
-        HFONT font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET,
-                                 OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
-                                 FIXED_PITCH | FF_MODERN, L"Consolas");
-        HFONT oldFont = (HFONT)SelectObject(dc, font);
-        fontBase = glGenLists(256);
-        wglUseFontBitmapsW(dc, 0, 256, fontBase);
-        SelectObject(dc, oldFont);
-        DeleteObject(font);
         cw = rc.right > 0 ? rc.right : 1;
         ch = rc.bottom > 0 ? rc.bottom : 1;
 
@@ -168,8 +160,10 @@ struct ProjectMHost {
         return true;
     }
 
-    // Collect every .milk file in a folder into the playable list, and (re)arm
-    // a folder watch so dropping/removing presets hot-reloads the library.
+    // Collect every .milk file in a folder into the playable list (sorted:
+    // FindFirstFile order is filesystem-dependent and cycling should be
+    // stable), and (re)arm a folder watch so dropped/removed presets
+    // hot-reload the library.
     void ScanPresets(const std::wstring& folder) {
         scanDir = folder;
         presetPaths.clear();
@@ -182,6 +176,10 @@ struct ProjectMHost {
             } while (FindNextFileW(h, &fd));
             FindClose(h);
         }
+        std::sort(presetPaths.begin(), presetPaths.end(),
+                  [](const std::wstring& a, const std::wstring& b) {
+                      return _wcsicmp(a.c_str(), b.c_str()) < 0;
+                  });
         if (presetWatch && presetWatch != INVALID_HANDLE_VALUE)
             FindCloseChangeNotification(presetWatch);
         presetWatch = FindFirstChangeNotificationW(folder.c_str(), FALSE,
@@ -261,7 +259,8 @@ struct ProjectMHost {
     // PCM ~30x and drove projectM's internal beat detection hot and wrong.)
     void RenderEngine(const float* pcm, int count) {
         if (!ready) return;
-        wglMakeCurrent(dc, glrc);
+        if (!wglMakeCurrent(dc, glrc)) { lost++; return; }  // GPU reset/TDR
+        lost = 0;
         if (pcm && count > 0) {
             unsigned int maxs = projectm_pcm_get_max_samples();
             unsigned int c = (unsigned)count < maxs ? (unsigned)count : maxs;
@@ -290,12 +289,16 @@ struct ProjectMHost {
         glBindTexture(GL_TEXTURE_2D, overlayTex);
         if (dirty && bgra && tw > 0 && th > 0) {
             glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, bgra);
-            overlayW = tw; overlayH = th;
+            if (tw != overlayW || th != overlayH) {   // (re)allocate on resize only
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, bgra);
+                overlayW = tw; overlayH = th;
+            } else {
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, tw, th, GL_BGRA_EXT, GL_UNSIGNED_BYTE, bgra);
+            }
         }
         if (overlayW <= 0) { glDisable(GL_TEXTURE_2D); return; }
         glEnable(GL_BLEND);
@@ -335,7 +338,8 @@ struct ProjectMHost {
         if (presetWatch && presetWatch != INVALID_HANDLE_VALUE) { FindCloseChangeNotification(presetWatch); presetWatch = nullptr; }
         if (glrc) wglMakeCurrent(dc, glrc);
         if (overlayTex) { glDeleteTextures(1, &overlayTex); overlayTex = 0; }
-        if (fontBase && glrc) { glDeleteLists(fontBase, 256); fontBase = 0; }
+        overlayW = overlayH = 0;
+        lost = 0;
         if (pm) { projectm_destroy(pm); pm = nullptr; }
         if (glrc) { wglMakeCurrent(nullptr, nullptr); wglDeleteContext(glrc); glrc = nullptr; }
         if (child && dc) ReleaseDC(child, dc);
