@@ -242,12 +242,36 @@ struct SpotifyClient {
     std::string clientId = "89df5ee986864e558952ba356aa968ea";
     std::string redirect = "http://127.0.0.1:8888/callback";
     std::string scopes   = "user-modify-playback-state user-read-playback-state user-read-currently-playing";
-    std::string accessToken, refreshToken;
+    std::string accessToken, refreshToken;   // guarded by tokLock
     std::atomic<bool> busy{ false };
     std::atomic<bool> quitFlag{ false };
     std::thread worker;
+    // Now-playing readout for the HUD, refreshed by a poller thread.
+    std::thread poller;
+    std::atomic<bool> pollerOn{ false };
+    SRWLOCK tokLock = SRWLOCK_INIT;
+    SRWLOCK npLock = SRWLOCK_INIT;
+    std::wstring npText;
 
     std::wstring IniPath() const { return PmExeDir() + L"wavescope.ini"; }
+
+    std::string Bearer() {
+        AcquireSRWLockShared(&tokLock);
+        std::string t = accessToken;
+        ReleaseSRWLockShared(&tokLock);
+        return t;
+    }
+    void SetNowPlaying(const std::wstring& s) {
+        AcquireSRWLockExclusive(&npLock);
+        npText = s;
+        ReleaseSRWLockExclusive(&npLock);
+    }
+    std::wstring NowPlaying() {
+        AcquireSRWLockShared(&npLock);
+        std::wstring s = npText;
+        ReleaseSRWLockShared(&npLock);
+        return s;
+    }
 
     std::string Dpapi(const std::string& in, bool enc) {
         DATA_BLOB i = { (DWORD)in.size(), (BYTE*)in.data() }, o = {};
@@ -259,8 +283,11 @@ struct SpotifyClient {
         return r;
     }
     void SaveToken() {
-        if (refreshToken.empty()) return;
-        std::string blob = Dpapi(refreshToken, true);
+        AcquireSRWLockShared(&tokLock);
+        std::string rt = refreshToken;
+        ReleaseSRWLockShared(&tokLock);
+        if (rt.empty()) return;
+        std::string blob = Dpapi(rt, true);
         std::wstring hx = SpWiden(SpHex((const BYTE*)blob.data(), blob.size()));
         AcquireSRWLockExclusive(&g_iniLock);
         WritePrivateProfileStringW(L"spotify", L"refresh", hx.c_str(), IniPath().c_str());
@@ -270,7 +297,13 @@ struct SpotifyClient {
         std::wstring path = IniPath();
         wchar_t buf[4096];
         GetPrivateProfileStringW(L"spotify", L"refresh", L"", buf, 4096, path.c_str());
-        if (buf[0]) refreshToken = Dpapi(SpUnHex(SpNarrow(buf)), false);
+        if (buf[0]) {
+            std::string rt = Dpapi(SpUnHex(SpNarrow(buf)), false);
+            AcquireSRWLockExclusive(&tokLock);
+            refreshToken = rt;
+            ReleaseSRWLockExclusive(&tokLock);
+            if (!rt.empty()) StartPoller();   // resume the HUD readout silently
+        }
         // Client ID lives in the ini (configurable, not baked in). Seed the
         // default on first run so it's there to edit; the ini is the source of
         // truth thereafter.
@@ -291,20 +324,27 @@ struct SpotifyClient {
 
     SpResp Player(const wchar_t* verb, const wchar_t* path, const std::string& body) {
         return SpHttps(L"api.spotify.com", verb, path, body,
-                       body.empty() ? "" : "application/json", accessToken);
+                       body.empty() ? "" : "application/json", Bearer());
     }
 
     bool RefreshAccess() {
-        if (refreshToken.empty()) return false;
-        std::string body = "grant_type=refresh_token&refresh_token=" + SpUrlEncode(refreshToken) +
+        AcquireSRWLockShared(&tokLock);
+        std::string rt = refreshToken;
+        ReleaseSRWLockShared(&tokLock);
+        if (rt.empty()) return false;
+        std::string body = "grant_type=refresh_token&refresh_token=" + SpUrlEncode(rt) +
                            "&client_id=" + SpUrlEncode(clientId);
         SpResp r = SpHttps(L"accounts.spotify.com", L"POST", L"/api/token", body,
                            "application/x-www-form-urlencoded", "");
         if (r.status != 200) return false;
-        accessToken = SpJson(r.body, "access_token");
+        std::string at = SpJson(r.body, "access_token");
         std::string nr = SpJson(r.body, "refresh_token");
-        if (!nr.empty()) { refreshToken = nr; SaveToken(); }
-        return !accessToken.empty();
+        AcquireSRWLockExclusive(&tokLock);
+        accessToken = at;
+        if (!nr.empty()) refreshToken = nr;
+        ReleaseSRWLockExclusive(&tokLock);
+        if (!nr.empty()) SaveToken();
+        return !at.empty();
     }
 
     bool DoPkceAuth() {
@@ -344,16 +384,61 @@ struct SpotifyClient {
         SpResp r = SpHttps(L"accounts.spotify.com", L"POST", L"/api/token", body,
                            "application/x-www-form-urlencoded", "");
         if (r.status != 200) return false;
-        accessToken = SpJson(r.body, "access_token");
-        refreshToken = SpJson(r.body, "refresh_token");
+        std::string at = SpJson(r.body, "access_token");
+        std::string rt = SpJson(r.body, "refresh_token");
+        AcquireSRWLockExclusive(&tokLock);
+        accessToken = at;
+        refreshToken = rt;
+        ReleaseSRWLockExclusive(&tokLock);
         SaveToken();
-        return !accessToken.empty();
+        return !at.empty();
     }
 
     bool EnsureToken() {
-        if (!accessToken.empty()) return true;
+        if (!Bearer().empty()) return true;
         if (RefreshAccess()) return true;
         return DoPkceAuth();
+    }
+
+    // ---- now-playing (HUD readout) ----
+
+    // Best-effort parse of /currently-playing: within `item`, "duration_ms"
+    // precedes the track-level "name", and the first "name" after "artists"
+    // is the artist. Flat scans, only on the trusted API response.
+    void UpdateNowPlaying() {
+        SpResp r = Player(L"GET", L"/v1/me/player/currently-playing", "");
+        if (r.status == 401) {
+            if (!RefreshAccess()) { SetNowPlaying(L""); return; }
+            r = Player(L"GET", L"/v1/me/player/currently-playing", "");
+        }
+        if (r.status != 200 || r.body.empty()) { SetNowPlaying(L""); return; }
+        if (SpJson(r.body, "is_playing") != "true") { SetNowPlaying(L""); return; }
+        size_t art = r.body.find("\"artists\"");
+        std::string artist = art == std::string::npos ? "" : SpJson(r.body.substr(art), "name");
+        size_t dur = r.body.find("\"duration_ms\"", art == std::string::npos ? 0 : art);
+        std::string track = dur == std::string::npos ? "" : SpJson(r.body.substr(dur), "name");
+        if (track.empty()) { SetNowPlaying(L""); return; }
+        std::wstring w = SpWiden(track);
+        if (!artist.empty()) w += L" \x2014 " + SpWiden(artist);
+        if (w.size() > 60) { w.resize(59); w += L"\x2026"; }
+        SetNowPlaying(w);
+    }
+
+    // Poll every 10 s while a session exists. Never opens the browser: it
+    // only refreshes with the stored token, so it's silent at startup.
+    void StartPoller() {
+        if (pollerOn.exchange(true)) return;
+        poller = std::thread([this] {
+            int tick = 0;
+            while (!quitFlag.load()) {
+                if (tick == 0) {
+                    if (!Bearer().empty() || RefreshAccess()) UpdateNowPlaying();
+                    tick = 20;           // 20 x 500 ms = 10 s cadence
+                }
+                tick--;
+                Sleep(500);
+            }
+        });
     }
 
     bool StartPlayback() {
@@ -389,6 +474,7 @@ struct SpotifyClient {
                 Notify(L"Spotify sign-in didn't complete. Try the button again.");
             return;
         }
+        StartPoller();       // begin/continue the now-playing HUD readout
         if (!quitFlag.load())
             StartPlayback(); // notifies on the device/premium cases; silent on success
     }
@@ -401,11 +487,12 @@ struct SpotifyClient {
         worker = std::thread([this] { Flow(); busy = false; });
     }
 
-    // Joined at app exit so the flow can't run through CRT teardown; the
-    // quit flag wakes the listener's 500 ms select ticks.
+    // Joined at app exit so the flows can't run through CRT teardown; the
+    // quit flag wakes the listener's and poller's 500 ms ticks.
     void Shutdown() {
         quitFlag = true;
         if (worker.joinable()) worker.join();
+        if (poller.joinable()) poller.join();
     }
 };
 

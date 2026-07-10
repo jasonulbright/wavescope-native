@@ -585,10 +585,11 @@ static float BinLog(const AudioFrame& f, float pos) {
 
 // --------------------------------------------------------------------- app
 
-// Shuffle timer choices, in seconds; 0 = off.
-static const int SHUFFLE_SECS[] = { 0, 15, 30, 60, 300 };
+// Shuffle timer choices, in seconds; 0 = off. NEGATIVE = auto-DJ: the tick
+// hops the ENGINE too (random engine + random visual), web-style.
+static const int SHUFFLE_SECS[] = { 0, 15, 30, 60, 300, -30 };
 static const int SHUFFLE_COUNT = (int)(sizeof(SHUFFLE_SECS) / sizeof(SHUFFLE_SECS[0]));
-static const wchar_t* SHUF_LABELS[] = { L"OFF", L"15s", L"30s", L"1m", L"5m" };
+static const wchar_t* SHUF_LABELS[] = { L"OFF", L"15s", L"30s", L"1m", L"5m", L"DJ" };
 
 // Render-resolution targets (backing-store height); 0 = auto (window size).
 struct ResOpt { const wchar_t* name; int height; };
@@ -665,6 +666,9 @@ struct App {
     float deckActivity = 0;  // last time the deck was touched (for auto-hide)
     bool fullscreen = false;
     WINDOWPLACEMENT savedPlacement = { sizeof(WINDOWPLACEMENT) };
+    int savedEngine = 0;         // persisted engine (0 wave, 1 gpu, 2 projm, 3 milk)
+    RECT restoreRect = {};       // persisted window placement
+    bool haveRestore = false, restoreMax = false;
     LARGE_INTEGER qpcFreq = {}, qpcStart = {};
     int fpsFrames = 0;
     float fpsWindowStart = 0;
@@ -841,9 +845,13 @@ struct App {
         if (hudActivity == 0) hudActivity = now;   // show the HUD at launch, then fade
 
         // Shuffle timer: hop to a random other visual (or preset) on interval.
-        if (SHUFFLE_SECS[shuffleIdx] > 0 && now - lastShuffle >= (float)SHUFFLE_SECS[shuffleIdx]) {
+        // DJ (negative interval) hops the engine as well.
+        int shufSecs = SHUFFLE_SECS[shuffleIdx];
+        int interval = shufSecs < 0 ? -shufSecs : shufSecs;
+        if (interval > 0 && now - lastShuffle >= (float)interval) {
             lastShuffle = now;
-            if (pmActive) pmHost.NextPreset(1);
+            if (shufSecs < 0) DjHop();
+            else if (pmActive) pmHost.NextPreset(1);
             else if (shaderActive) shaderIdx = (shaderIdx + 1) % shaderHost.ShaderCount();
             else modeIdx = PickRandomMode();
             if (shufflePalettes) paletteIdx = PickRandomIncludedPalette();
@@ -853,21 +861,33 @@ struct App {
         tap.Analyze(frame, now);
         if (calm) frame.beat *= 0.2f; // photosensitivity: tame the pulse
 
-        // Auto-hide the deck once idle (shared by every engine); the open
-        // shader picker keeps it alive.
-        if (deckVisible && deckMenu < 0 && now - deckActivity > 2.5f) { deckVisible = false; deckHover = -1; }
+        // Auto-hide the deck after 3 s idle (web parity); an open dropdown
+        // keeps it alive.
+        if (deckVisible && deckMenu < 0 && now - deckActivity > 3.0f) { deckVisible = false; deckHover = -1; }
         RECT crc; GetClientRect(hwnd, &crc);
 
         // projectM engine: render OpenGL on the child window, then composite
         // the D2D-rendered UI overlay (crisp, identical to the built-in view)
         // as a texture on top.
+        // Extra HUD lines shared by every engine (contract readout: SRC/MODE/
+        // RES/FPS/SHUFFLE/REC/now-playing).
+        wchar_t extra[220] = L"";
+        {
+            size_t off = 0;
+            if (shuffleIdx > 0)
+                off += _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\nSHUF %s", SHUF_LABELS[shuffleIdx]);
+            std::wstring np = g_spotify.NowPlaying();
+            if (!np.empty())
+                _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\n\x266A %s", np.c_str());
+        }
+
         if (pmActive && pmHost.ready) {
             // _TRUNCATE everywhere a preset/file name flows into a HUD buffer:
             // swprintf_s would abort the process if a long name didn't fit.
-            wchar_t l1[300];
-            _snwprintf_s(l1, _TRUNCATE, L"SRC %s\n%s %s\nRES %s\nFPS %d",
+            wchar_t l1[512];
+            _snwprintf_s(l1, _TRUNCATE, L"SRC %s\n%s %s\nRES %s\nFPS %d%s",
                        tap.SourceName(), milkMode ? L"MILK" : L"PROJM", pmHost.PresetName(),
-                       RES_OPTS[resIdx].name, fps);
+                       RES_OPTS[resIdx].name, fps, extra);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             float pcm[4800];   // up to 100 ms of new samples per frame
             int newN = tap.ReadNew(pmPcmCursor, pcm, 4800, now);
@@ -886,9 +906,9 @@ struct App {
 
         // GPU shader engine: a fullscreen fragment shader, same UI over it.
         if (shaderActive && shaderHost.ready) {
-            wchar_t l1[300];
-            _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nGPU %s\nRES %s\nFPS %d",
-                       tap.SourceName(), shaderHost.ShaderName(shaderIdx), RES_OPTS[resIdx].name, fps);
+            wchar_t l1[512];
+            _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nGPU %s\nRES %s\nFPS %d%s",
+                       tap.SourceName(), shaderHost.ShaderName(shaderIdx), RES_OPTS[resIdx].name, fps, extra);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             shaderHost.RenderEngine(shaderIdx, frame);
             if (shaderHost.lost == 0) {
@@ -929,10 +949,10 @@ struct App {
             bmp->Release();
         }
 
-        wchar_t l1[300];
-        _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nMODE %s  (%02d/%d)\nRES %s\nFPS %d%s",
+        wchar_t l1[512];
+        _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nMODE %s  (%02d/%d)\nRES %s\nFPS %d%s%s",
                    tap.SourceName(), mode.name, modeIdx + 1, MODE_COUNT,
-                   RES_OPTS[resIdx].name, fps, calm ? L"   CALM" : L"");
+                   RES_OPTS[resIdx].name, fps, calm ? L"   CALM" : L"", extra);
         float sc = UiScale();
         rt->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc));
         D2DPainter dp(rt, brush, hudFont, deckFont, tinyFont, sc);
@@ -1142,6 +1162,40 @@ struct App {
         case DK_FULL:  ToggleFullscreen(); break;
         case DK_HELP:  help = !help; break;
         }
+    }
+
+    // Auto-DJ: hop to a random engine that is ready to go, then a random
+    // visual inside it (web behavior). Engines that fail to start fall back
+    // to the built-in modes.
+    void DjHop() {
+        switch (rand() % 3) {
+        case 1:   // GPU shaders
+            if (pmActive) ToggleProjectM();
+            if (!shaderActive) ToggleShader();
+            if (shaderActive && shaderHost.ShaderCount() > 0) {
+                shaderIdx = rand() % shaderHost.ShaderCount();
+                return;
+            }
+            break;
+        case 2:   // projectM
+            if (shaderActive) ToggleShader();
+            if (!pmActive) ToggleProjectM();
+            if (pmActive && pmHost.PresetCount() > 0) {
+                pmHost.LoadPreset(rand() % pmHost.PresetCount(), false);
+                return;
+            }
+            break;
+        }
+        if (pmActive) ToggleProjectM();
+        if (shaderActive) ToggleShader();
+        modeIdx = PickRandomMode();
+    }
+
+    // Cycle the whole engine (WaveScope -> GPU -> projectM), E key.
+    void CycleEngine() {
+        if (!pmActive && !shaderActive) ToggleShader();
+        else if (shaderActive) { ToggleShader(); ToggleProjectM(); }
+        else ToggleProjectM();   // back to built-in
     }
 
     // Cycle the active engine's selection (mode / shader / preset) with ‹ ›.
@@ -1373,19 +1427,19 @@ struct App {
             L"\n"
             L"SPACE / \x2192      next mode (or preset / shader)\n"
             L"\x2190              previous\n"
+            L"E              cycle engine (WaveScope / GPU / projectM)\n"
+            L"G              GPU shader engine\n"
             L"P              cycle trace palette\n"
             L"N              palettes + shuffle panel (edit / include)\n"
             L"1 / 2 / 3      source: system / mic / demo\n"
             L"4              open an audio file\n"
-            L"M              MilkDrop engine (projectM)\n"
-            L"G              GPU shader engine\n"
+            L"M              displays (pick a monitor)\n"
             L"B              Spotify: authorize + start playback (Premium)\n"
-            L"S              shuffle timer (off / 15s / 30s / 1m / 5m)\n"
+            L"S              shuffle timer (off / 15s / 30s / 1m / 5m / DJ)\n"
             L"C              calm mode (photosensitive-safe)\n"
-            L"R              resolution (AUTO / 1080 / 1440 / 4K / 8K)\n"
-            L"L              MilkDrop preset folder\n"
+            L"L              MilkDrop preset folder     RES \x25BE on the deck\n"
             L"F              fullscreen        H   HUD (auto-fades on idle)\n"
-            L"F1 / ?         this help         ESC quit\n"
+            L"F1 / ?         this help         ESC close / restore / quit\n"
             L"\n"
             L"Launch: WaveScope.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
             L"        [install-startup | remove-startup]   \x2014   tray icon: right-click";
@@ -1442,7 +1496,12 @@ struct App {
         LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
         if (pidl) {
             wchar_t path[MAX_PATH];
-            if (SHGetPathFromIDListW(pidl, path)) pmHost.SetPresetFolder(path);
+            if (SHGetPathFromIDListW(pidl, path)) {
+                libraryFolder = path;   // persisted; MILK mode uses it
+                milkMode = true;
+                pmHost.SetPresetFolder(path);
+                SaveConfig();
+            }
             CoTaskMemFree(pidl);
         }
     }
@@ -1764,6 +1823,22 @@ struct App {
         wi(L"mode", modeIdx); wi(L"palette", paletteIdx); wi(L"resolution", resIdx);
         wi(L"shuffle", shuffleIdx); wi(L"calm", calm ? 1 : 0); wi(L"shader", shaderIdx);
         wi(L"shufflePal", shufflePalettes ? 1 : 0);
+        wi(L"engine", pmActive ? (milkMode ? 3 : 2) : (shaderActive ? 1 : 0));
+        WritePrivateProfileStringW(L"settings", L"milkFolder", libraryFolder.c_str(), path.c_str());
+        // Window placement: the pre-fullscreen placement when fullscreen.
+        // Skipped once the window is destroyed (the WM_CLOSE-time save wrote
+        // the real values; the exit-path save must not clobber them).
+        WINDOWPLACEMENT wp = { sizeof(WINDOWPLACEMENT) };
+        if (fullscreen) wp = savedPlacement;
+        else if (!IsWindow(hwnd) || !GetWindowPlacement(hwnd, &wp)) wp = {};
+        if (wp.rcNormalPosition.right > wp.rcNormalPosition.left) {
+            wchar_t buf[96];
+            _snwprintf_s(buf, _TRUNCATE, L"%ld,%ld,%ld,%ld,%d",
+                         wp.rcNormalPosition.left, wp.rcNormalPosition.top,
+                         wp.rcNormalPosition.right, wp.rcNormalPosition.bottom,
+                         wp.showCmd == SW_SHOWMAXIMIZED ? 1 : 0);
+            WritePrivateProfileStringW(L"settings", L"window", buf, path.c_str());
+        }
         EnsurePalInclude();
         std::wstring inc;
         for (char v : palInclude) inc += (v ? L'1' : L'0');
@@ -1822,6 +1897,18 @@ struct App {
         calm = GetPrivateProfileIntW(L"settings", L"calm", 0, path.c_str()) != 0;
         shaderIdx = Clampi(GetPrivateProfileIntW(L"settings", L"shader", 0, path.c_str()), 0, SV_COUNT - 1);
         shufflePalettes = GetPrivateProfileIntW(L"settings", L"shufflePal", 0, path.c_str()) != 0;
+        savedEngine = Clampi(GetPrivateProfileIntW(L"settings", L"engine", 0, path.c_str()), 0, 3);
+        wchar_t mf[MAX_PATH];
+        GetPrivateProfileStringW(L"settings", L"milkFolder", L"", mf, MAX_PATH, path.c_str());
+        libraryFolder = mf;
+        wchar_t wb[96];
+        GetPrivateProfileStringW(L"settings", L"window", L"", wb, 96, path.c_str());
+        long l = 0, t = 0, r = 0, b = 0; int mx = 0;
+        if (swscanf_s(wb, L"%ld,%ld,%ld,%ld,%d", &l, &t, &r, &b, &mx) == 5 && r > l && b > t) {
+            restoreRect = { l, t, r, b };
+            restoreMax = mx != 0;
+            haveRestore = true;
+        }
         wchar_t inc[128];
         GetPrivateProfileStringW(L"settings", L"palInclude", L"", inc, 128, path.c_str());
         palInclude.clear();
@@ -1987,17 +2074,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case '4':      a->OpenFile(); break;
         case 'S':      a->CycleShuffle(); break;
         case 'C':      a->SetCalm(!a->calm); break;
-        case 'R':      a->resIdx = (a->resIdx + 1) % RES_COUNT; break;
         case 'L':      a->OpenPresetFolder(); break;
-        case 'M':      a->ToggleProjectM(); break;
-        case 'G':      a->ToggleShader(); break;
+        case 'M':      // web parity: M = displays
+            a->deckVisible = true; a->deckActivity = a->Now();
+            a->deckMenu = (a->deckMenu == App::DK_DISP ? -1 : App::DK_DISP);
+            break;
+        case 'E':      a->CycleEngine(); break;       // WaveScope -> GPU -> projectM
+        case 'G':      a->ToggleShader(); break;      // jump straight to GPU
         case 'B':      g_spotify.OneButton(); break;  // Spotify: authorize + play
         case 'F':      a->ToggleFullscreen(); break;
         case 'H':      a->hud = !a->hud; break;
         case VK_F1:    a->help = !a->help; break;
         case VK_OEM_2: if (GetKeyState(VK_SHIFT) & 0x8000) a->help = !a->help; break; // '?'
         case VK_ESCAPE:
-            if (a->palPanel) a->palPanel = false;      // ESC closes the panel first
+            // Web-style restore chain: panel -> open dropdown -> help ->
+            // fullscreen -> quit.
+            if (a->palPanel) a->palPanel = false;
+            else if (a->deckMenu >= 0) a->deckMenu = -1;
+            else if (a->help) a->help = false;
+            else if (a->fullscreen) a->ToggleFullscreen();
             else PostQuitMessage(0);
             break;
         }
@@ -2030,6 +2125,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SYSCOMMAND:
         if ((wp & 0xFFF0) == SC_MINIMIZE && g_trayAdded) { ShowWindow(hwnd, SW_HIDE); return 0; }
         break;  // other syscommands fall through to DefWindowProc
+    case WM_CLOSE:
+        a->SaveConfig();   // capture placement while the window still exists
+        break;             // DefWindowProc destroys the window
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -2059,7 +2157,18 @@ static App* CreateView(HINSTANCE inst, const wchar_t* cls, RECT rc, bool borderl
     }
     v->tap.Start();
     v->LoadConfig();
-    ShowWindow(v->hwnd, borderless ? SW_SHOW : nCmdShow);
+    // Restore the saved placement (normal windows only, and only when the
+    // saved rect still lands on a live monitor).
+    if (!borderless && v->haveRestore) {
+        RECT r = v->restoreRect;
+        if (MonitorFromRect(&r, MONITOR_DEFAULTTONULL) &&
+            r.right - r.left >= 320 && r.bottom - r.top >= 240)
+            SetWindowPos(v->hwnd, nullptr, r.left, r.top,
+                         r.right - r.left, r.bottom - r.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    ShowWindow(v->hwnd, borderless ? SW_SHOW
+                        : (v->restoreMax ? SW_SHOWMAXIMIZED : nCmdShow));
     g_views.push_back(v);
     return v;
 }
@@ -2162,6 +2271,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         if (!opts.file.empty()) v->tap.SetFile(opts.file.c_str());
         if (opts.milkdrop) v->ToggleProjectM();
         if (opts.shader) v->ToggleShader();
+    }
+    // No engine flag given: restore the persisted engine on the primary view.
+    if (!opts.milkdrop && !opts.shader && !opts.selftest && !g_views.empty()) {
+        App* v = g_views[0];
+        switch (v->savedEngine) {
+        case 1: v->ToggleShader(); break;
+        case 2: v->EnterProjectM(false); break;
+        case 3: v->EnterProjectM(true); break;
+        }
     }
 
     if (opts.selftest) {
