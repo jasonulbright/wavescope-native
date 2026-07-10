@@ -50,47 +50,15 @@
 
 // ---------------------------------------------------------------- utilities
 
-static const float PI  = 3.14159265358979f;
-static const float TAU = 6.28318530717959f;
-
 template <typename T> static void SafeRelease(T** p) {
     if (*p) { (*p)->Release(); *p = nullptr; }
 }
 
-// HSL -> RGB, matching the web palettes' hsla() usage.
-static D2D1_COLOR_F Hsla(float h, float s, float l, float a) {
-    h = fmodf(h, 360.0f) / 360.0f;
-    if (h < 0) h += 1.0f;
-    auto hue = [](float p, float q, float t) {
-        if (t < 0) t += 1;
-        if (t > 1) t -= 1;
-        if (t < 1.0f / 6) return p + (q - p) * 6 * t;
-        if (t < 1.0f / 2) return q;
-        if (t < 2.0f / 3) return p + (q - p) * (2.0f / 3 - t) * 6;
-        return p;
-    };
-    float r, g, b;
-    if (s <= 0.0f) {
-        r = g = b = l;
-    } else {
-        float q = l < 0.5f ? l * (1 + s) : l + s - l * s;
-        float p = 2 * l - q;
-        r = hue(p, q, h + 1.0f / 3);
-        g = hue(p, q, h);
-        b = hue(p, q, h - 1.0f / 3);
-    }
-    return D2D1::ColorF(r, g, b, a);
-}
+// The pure analysis math (AudioFrame, Hsla, BinLog, FFT, AnalyzeWindow) —
+// shared with tests.cpp, which asserts it against the web contract.
+#include "analysis.inl"
 
 // ------------------------------------------------------------------- audio
-
-// One analyzed slice per rendered frame; mirrors the web AudioFrame.
-struct AudioFrame {
-    float fft[1024];   // 0..1, log-ish dB mapping like the Web Audio analyser
-    float wave[2048];  // -1..1 mono time domain
-    float level = 0, bass = 0, mid = 0, treble = 0, beat = 0;
-    float t = 0, dt = 0.016f;
-};
 
 // WASAPI loopback capture into a mono ring buffer + FFT analysis on demand.
 class AudioTap {
@@ -168,13 +136,6 @@ public:
 
     // Snapshot the newest 2048 samples and analyze them.
     void Analyze(AudioFrame& f, float now) {
-        float dt = now - m_lastT;
-        if (dt < 0.001f) dt = 0.001f;
-        if (dt > 0.1f)   dt = 0.1f;
-        m_lastT = now;
-        f.t = now;
-        f.dt = dt;
-
         float window[2048];
         if (m_source.load() == SRC_DEMO) {
             // Synthesize a coherent window ending at the current time. The
@@ -192,53 +153,9 @@ public:
             }
             ReleaseSRWLockShared(&m_lock);
         }
-        for (int i = 0; i < 2048; i++) f.wave[i] = window[i];
-
-        // The Web Audio analyser recipe, exactly: Blackman window, FFT,
-        // |X|/N, per-bin smoothing 0.8 on LINEAR magnitudes, then the
-        // [-100,-30] dB byte mapping. Same music must read the same here.
-        static float re[2048], im[2048];
-        for (int i = 0; i < 2048; i++) {
-            float bw = 0.42f - 0.5f * cosf(TAU * i / 2048.0f)
-                             + 0.08f * cosf(2.0f * TAU * i / 2048.0f);
-            re[i] = window[i] * bw;
-            im[i] = 0.0f;
-        }
-        Fft2048(re, im);
-        for (int i = 0; i < 1024; i++) {
-            float mag = sqrtf(re[i] * re[i] + im[i] * im[i]) / 2048.0f;
-            m_smooth[i] = m_smooth[i] * 0.8f + mag * 0.2f;
-            float db = 20.0f * log10f(m_smooth[i] + 1e-12f);
-            float norm = (db + 100.0f) / 70.0f;
-            if (norm < 0) norm = 0;
-            if (norm > 1) norm = 1;
-            f.fft[i] = norm;
-        }
-
-        // Band energies (split at 250 Hz / 4 kHz) + RMS level + beat.
-        float sr = (float)(m_sampleRate ? m_sampleRate : 48000);
-        float hzPerBin = sr / 2.0f / 1024.0f;
-        auto band = [&](float lo, float hi) {
-            int a = (int)fmaxf(0.0f, floorf(lo / hzPerBin));
-            int b = (int)fminf(1023.0f, ceilf(hi / hzPerBin));
-            float sum = 0;
-            for (int i = a; i <= b; i++) sum += f.fft[i];
-            return sum / (float)(b - a + 1);
-        };
-        f.bass   = band(20, 250);
-        f.mid    = band(250, 4000);
-        f.treble = band(4000, 16000);
-
-        float rms = 0;
-        for (int i = 0; i < 2048; i += 4) rms += window[i] * window[i];
-        rms = sqrtf(rms / 512.0f);
-        m_level += (rms - m_level) * 0.2f;
-        f.level = m_level;
-
-        m_bassAvg += (f.bass - m_bassAvg) * 0.04f;
-        if (f.bass > m_bassAvg * 1.35f && f.bass > 0.08f) m_beat = 1.0f;
-        m_beat *= expf(-dt * 6.0f);
-        f.beat = m_beat;
+        // The Web-Audio-analyser-matched math lives in analysis.inl
+        // (tests.cpp asserts it against the contract).
+        AnalyzeWindow(m_an, window, (float)(m_sampleRate ? m_sampleRate : 48000), now, f);
     }
 
 private:
@@ -525,36 +442,6 @@ private:
         reader->Release();
     }
 
-    // Iterative radix-2 Cooley-Tukey, N=2048.
-    static void Fft2048(float* re, float* im) {
-        const int N = 2048, LOG2N = 11;
-        for (int i = 0; i < N; i++) { // bit-reverse permutation
-            unsigned r = 0, x = (unsigned)i;
-            for (int b = 0; b < LOG2N; b++) { r = (r << 1) | (x & 1); x >>= 1; }
-            if ((int)r > i) {
-                float tr = re[i]; re[i] = re[r]; re[r] = tr;
-                float ti = im[i]; im[i] = im[r]; im[r] = ti;
-            }
-        }
-        for (int len = 2; len <= N; len <<= 1) {
-            float ang = -TAU / (float)len;
-            float wr = cosf(ang), wi = sinf(ang);
-            for (int i = 0; i < N; i += len) {
-                float cr = 1, ci = 0;
-                for (int j = 0; j < len / 2; j++) {
-                    int a = i + j, b = i + j + len / 2;
-                    float tr = re[b] * cr - im[b] * ci;
-                    float ti = re[b] * ci + im[b] * cr;
-                    re[b] = re[a] - tr; im[b] = im[a] - ti;
-                    re[a] += tr;        im[a] += ti;
-                    float ncr = cr * wr - ci * wi;
-                    ci = cr * wi + ci * wr;
-                    cr = ncr;
-                }
-            }
-        }
-    }
-
     HANDLE m_thread = nullptr;
     std::atomic<bool> m_quit{false};
     std::atomic<int> m_source{ SRC_LOOPBACK };
@@ -564,24 +451,14 @@ private:
     float m_ring[RING] = {};
     uint64_t m_writeIdx = 0;
     UINT32 m_sampleRate = 48000;
-    float m_smooth[1024] = {};
-    float m_level = 0, m_bassAvg = 0, m_beat = 0, m_lastT = 0;
+    AnalysisState m_an;
     wchar_t m_filePath[MAX_PATH] = {};
 };
 
 // ------------------------------------------------------------------- modes
 
-// Log-axis FFT sampling, matching the web engine's bin() helper. Defined here
-// (before the include) because the ported modes rely on it.
-static float BinLog(const AudioFrame& f, float pos) {
-    if (pos < 0) pos = 0;
-    if (pos > 1) pos = 1;
-    int idx = (int)powf(1023.0f, pos * 0.92f + 0.08f);
-    if (idx > 1023) idx = 1023;
-    return f.fft[idx];
-}
-
 // Palettes, the DrawCtx primitives, all 34 modes, and the MODES[] registry.
+// (BinLog lives in analysis.inl.)
 #include "viz_modes.inl"
 
 // The projectM (MilkDrop) engine host: child GL window + libprojectM.
