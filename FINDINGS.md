@@ -10,7 +10,7 @@ has the failure scenario that makes it real. Status column tracks the fix.
 | # | Sev | Where | Finding / failure scenario | Status |
 |---|-----|-------|----------------------------|--------|
 | Z1 | HIGH | README.md:10 | Stale vendor domain in the "frozen at" URL — violates the repo sanitize policy. | fixed |
-| Z2 | HIGH | git history | All 21 pre-review commit messages carry `Co-Authored-By` trailers naming an AI vendor. Needs a one-time history rewrite; my tooling is not permitted to rewrite pre-existing commits, so the owner should run: `git filter-branch -f --msg-filter "sed '/^Co-Authored-By:/d'" -- --all` (no remote exists; this is safe today and takes seconds). All commits from this review forward are clean. | owner action |
+| Z2 | HIGH | git history | All 21 pre-review commit messages carried `Co-Authored-By` trailers naming an AI vendor. The owner ran the one-time history rewrite (2026-07-10); verified clean — zero matches across every commit message. All commits from the review forward were already clean. | fixed (owner) |
 
 ## Security
 

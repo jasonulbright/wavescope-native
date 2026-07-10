@@ -1,9 +1,10 @@
 # WaveScope (native)
 
 A music visualizer built like an instrument, and built like a classic
-Windows app: one C++ source tree, one statically linked exe, OS DLLs plus
-exactly one deliberate dependency (libprojectM for real MilkDrop). The audit
-surface is this repo, Windows, and the pinned projectM build.
+Windows app: one C++ source tree, one statically linked exe, OS facilities
+everywhere they exist, and exactly two deliberate dependencies — libprojectM
+for real MilkDrop and the Spout SDK for OBS texture sharing, both pinned.
+The audit surface is this repo, Windows, and those two pins.
 
 This is the native successor to the WaveScope web app (live at
 https://wavescope.signalridgelabs.com, source at
@@ -11,9 +12,8 @@ github.com/jasonulbright/wavescope). It matches the web app feature for
 feature — same analysis math, same 34 modes, same 17 GPU shaders, same
 palettes, the same 15 `.milk` presets plus the full 551-preset classic
 MilkDrop library in original form — and adds the things only a desktop app
-can do: silent WASAPI
-loopback, MP4 clip recording, companion displays from one engine,
-always-on-top, tray, launch at login.
+can do: silent WASAPI loopback, MP4 clip recording, companion displays from
+one engine, Spout output for OBS, always-on-top, tray, launch at login.
 
 ## Build
 
@@ -38,10 +38,13 @@ Requires Visual Studio 2026 (any edition) and the projectM native build at
 WaveScope.exe selftest
 ```
 
-Renders every engine on the demo signal, sweeps all 34 modes and all 17
-shaders, records a 1.6 s MP4 and re-opens it, dumps PNGs of what actually
-rendered beside the exe, writes `wavescope-selftest.log`, and exits nonzero
-on any failure. Run it after every change; CI-in-a-flag.
+Renders every engine on the demo signal and asserts real output: sweeps all
+34 modes and all 17 shaders (17/17 must compile), records a 1.6 s MP4 and
+re-opens/decodes it, does a Spout roundtrip through an in-process receiver,
+sweeps a spread of the 551 classic presets through the ns-eel parser, dumps
+PNGs of what actually rendered beside the exe, writes
+`wavescope-selftest.log`, and exits nonzero on any failure. Run it after
+every change; CI-in-a-flag.
 
 ## The three engines
 
@@ -182,6 +185,22 @@ DX subset, BSD-2-Clause, pinned in-tree), and small hand-rolled code only
 where it is boring and testable (ini, flat JSON reads, base64url) — with
 the FFT and analysis pinned by unit tests.
 
+## Licensing
+
+The app's own license is not yet chosen (private repo). Third-party:
+
+- **libprojectM 4.x** — LGPL-2.1, satisfied by dynamic linking
+  (`projectM-4.dll` ships beside the exe, never statically linked).
+- **Spout SDK (DX subset)** — BSD-2-Clause, vendored verbatim with its
+  license at `third_party/spout/LICENSE.txt` (pin in `PIN.md` there).
+- **MilkDrop preset + texture packs** — community-distributed content,
+  redistributed from the projectM-visualizer org (`presets-classic/` and
+  `textures/`, provenance and pins in `DEPENDENCIES.md`; the pack's own
+  README ships alongside).
+
+## Project docs
+
 `FINDINGS.md` records the adversarial review this codebase went through;
 `PARITY.md` tracks the feature matrix against the web app;
+`DEPENDENCIES.md` is the dependency decision table;
 `DEMO-CHECKLIST.md` is the 5-minute walkthrough script.
