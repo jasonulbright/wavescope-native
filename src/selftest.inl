@@ -106,6 +106,15 @@ static int RunSelfTest(App* v) {
     // --- built-in D2D modes ---
     if (v->pmActive) v->ToggleProjectM();
     if (v->shaderActive) v->ToggleShader();
+    // Sweep every mode for a few frames first: exercises each one's state
+    // path (pools, history, scratch buffers) as a crash/hang smoke test.
+    int keepMode = v->modeIdx;
+    for (int mi = 0; mi < MODE_COUNT; mi++) {
+        v->modeIdx = mi;
+        for (int k = 0; k < 8; k++) { pump(); v->Render(); }
+    }
+    out(L"builtin: swept all %d modes", MODE_COUNT);
+    v->modeIdx = keepMode;
     float t0 = v->Now(); int frames = 90;
     for (int i = 0; i < frames; i++) { pump(); v->Render(); }
     float fps = frames / (v->Now() - t0 + 1e-6f);
@@ -125,6 +134,13 @@ static int RunSelfTest(App* v) {
     if (!v->shaderActive || !v->shaderHost.ready) {
         out(L"shader: engine failed to start -> FAIL"); rc = 1;
     } else {
+        int keepShader = v->shaderIdx;
+        for (int si = 0; si < v->shaderHost.ShaderCount(); si++) {
+            v->shaderIdx = si;
+            for (int k = 0; k < 8; k++) { pump(); v->Render(); }
+        }
+        out(L"shader: swept all %d shaders", v->shaderHost.ShaderCount());
+        v->shaderIdx = keepShader;
         for (int i = 0; i < 60; i++) { pump(); v->Render(); }
         AudioFrame f; v->tap.Analyze(f, v->Now());
         v->shaderHost.RenderEngine(v->shaderIdx, f);   // render, don't present
