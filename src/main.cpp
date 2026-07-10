@@ -503,6 +503,10 @@ static bool g_companionsOpen = false;
 static void OpenCompanions(HINSTANCE inst);
 static void CloseCompanions();
 
+// Selftest drives the app through transient states (engines, Spout on/off);
+// none of that may leak into the user's wavescope.ini.
+static bool g_noPersist = false;
+
 struct App {
     HWND hwnd = nullptr;
     ID2D1Factory* d2d = nullptr;
@@ -1900,7 +1904,7 @@ struct App {
     std::wstring ConfigPath() const { return PmExeDir() + L"wavescope.ini"; }
 
     void SaveConfig() {
-        if (isCompanion) return;   // only the primary window's setup persists
+        if (isCompanion || g_noPersist) return; // primary window only, never selftest
         std::wstring path = ConfigPath();
         AcquireSRWLockExclusive(&g_iniLock);   // vs. the Spotify worker's SaveToken
         auto wi = [&](const wchar_t* k, int v) {
@@ -2363,6 +2367,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // UI-thread shell dialogs
 
     LaunchOpts opts = ParseCmdLine();
+    g_noPersist = opts.selftest;       // a test run must not rewrite the config
     srand((unsigned)GetTickCount64()); // shuffle must differ across launches
 
     // Explicit launch-at-login toggles (user runs these deliberately).
