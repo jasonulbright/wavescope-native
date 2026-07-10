@@ -5,8 +5,9 @@
 // Everything below links against OS DLLs only; /MT static CRT means the
 // shipped artifact is one .exe with zero runtime requirements.
 //
-// Keys: SPACE/RIGHT next (mode or preset), LEFT prev, P palette,
-// M toggle MilkDrop (projectM) engine, F fullscreen, H HUD, ESC quit.
+// Keys: SPACE/RIGHT next (mode or preset), LEFT prev, E cycle engine,
+// P palette, M displays, R record, F fullscreen, H HUD, ESC restore/quit —
+// F1 / ? shows the full map.
 //
 // All 34 WaveScope modes are ported (viz_modes.inl) across six palettes, and
 // the real MilkDrop engine runs via projectM (projectm_host.inl).
@@ -707,13 +708,25 @@ struct App {
         recW = recH = 0;
     }
 
+    // Recording renders at the offscreen size clamped to 4K: H.264 encoders
+    // top out near 4096 px a side, so an 8K target would only ever fail (and
+    // queue ~1 GB of staging frames). On-screen look is unchanged — the
+    // recording surface scales to the window exactly like the offscreen.
+    void RecTargetSize(UINT& w, UINT& h) const {
+        w = offW; h = offH;
+        if (h > 2160) { w = (UINT)((UINT64)w * 2160 / h); h = 2160; }
+        if (w > 3840) { h = (UINT)((UINT64)h * 3840 / w); w = 3840; }
+        if (w < 2) w = 2; if (h < 2) h = 2;
+    }
+
     // The CPU-side offscreen the built-in engine renders through while
-    // recording, sized like the normal offscreen.
+    // recording, sized like the normal offscreen (clamped for the encoder).
     bool EnsureRecOffscreen() {
         if (!wic || !offscreen) return false;
-        if (recRT && recW == offW && recH == offH) return true;
+        UINT tw, th; RecTargetSize(tw, th);
+        if (recRT && recW == tw && recH == th) return true;
         ReleaseRecOffscreen();
-        if (FAILED(wic->CreateBitmap(offW, offH, GUID_WICPixelFormat32bppPBGRA,
+        if (FAILED(wic->CreateBitmap(tw, th, GUID_WICPixelFormat32bppPBGRA,
                                      WICBitmapCacheOnLoad, &recBmp))) return false;
         D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
             D2D1_RENDER_TARGET_TYPE_DEFAULT,
@@ -723,7 +736,7 @@ struct App {
             ReleaseRecOffscreen(); return false;
         }
         recRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &recBrush);
-        recW = offW; recH = offH;
+        recW = tw; recH = th;
         return true;
     }
 
@@ -752,7 +765,8 @@ struct App {
         int w = rc.right, h = rc.bottom;
         if (!pmActive && !shaderActive) {
             EnsureOffscreen(rc.right, rc.bottom);
-            w = (int)offW; h = (int)offH;
+            UINT tw, th; RecTargetSize(tw, th);
+            w = (int)tw; h = (int)th;
         }
         if (!rec.Start(w, h, g_tap.SampleRate(), &g_tap))
             SetWindowTextW(hwnd, L"WaveScope  (recording failed to start)");
@@ -866,20 +880,24 @@ struct App {
         // as a texture on top.
         // Extra HUD lines shared by every engine (contract readout: SRC/MODE/
         // RES/FPS/SHUFFLE/REC/now-playing).
+        // Truncation returns -1; naive `off +=` would wrap the offset and the
+        // next append would write through a wild pointer. Append defensively.
         wchar_t extra[220] = L"";
         {
             size_t off = 0;
-            if (shuffleIdx > 0)
-                off += _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\nSHUF %s", SHUF_LABELS[shuffleIdx]);
+            auto append = [&](const wchar_t* fmt, auto... args) {
+                if (off + 1 >= 220) return;
+                int r = _snwprintf_s(extra + off, 220 - off, _TRUNCATE, fmt, args...);
+                if (r > 0) off += (size_t)r; else off = 219; // truncated: buffer is full
+            };
+            if (shuffleIdx > 0) append(L"\nSHUF %s", SHUF_LABELS[shuffleIdx]);
             std::wstring np = g_spotify.NowPlaying();
-            if (!np.empty())
-                off += _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\n\x266A %s", np.c_str());
+            if (!np.empty()) append(L"\n\x266A %s", np.c_str());
             if (rec.Active()) {
                 int s = (int)rec.Seconds();
-                off += _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\n\x25CF REC %02d:%02d", s / 60, s % 60);
+                append(L"\n\x25CF REC %02d:%02d", s / 60, s % 60);
             }
-            if (spout.on)
-                _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\nSPOUT OUT");
+            if (spout.on) append(L"\nSPOUT OUT");
         }
 
         if (pmActive && pmHost.ready) {
@@ -1630,7 +1648,7 @@ struct App {
             pmHost.Resize(rc.right, rc.bottom);
             pmHost.Show(true);
             pmActive = true;
-            SetWindowTextW(hwnd, L"WaveScope  projectM (M to exit, SPACE next preset)");
+            SetWindowTextW(hwnd, L"WaveScope  projectM (SPACE next preset, E cycles engine)");
         } else {
             pmActive = false;
             pmHost.Show(false);
@@ -1651,7 +1669,7 @@ struct App {
             shaderHost.Resize(rc.right, rc.bottom);
             shaderHost.Show(true);
             shaderActive = true;
-            SetWindowTextW(hwnd, L"WaveScope  GPU shader (G to exit, SPACE next shader)");
+            SetWindowTextW(hwnd, L"WaveScope  GPU shader (SPACE next shader, E cycles engine)");
         } else {
             shaderActive = false;
             shaderHost.Show(false);
