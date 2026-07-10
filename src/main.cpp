@@ -528,6 +528,15 @@ struct App {
     std::vector<BYTE> olPixels;   // last rendered BGRA, uploaded on change
     std::wstring olSig;           // signature of what's drawn (dirty check)
     std::vector<CustomPalette> customPalettes;
+    // Palettes + shuffle panel (the web "PALETTES + SHUFFLE" window).
+    bool palPanel = false;             // panel open
+    bool shufflePalettes = false;      // shuffle tick also re-rolls the palette
+    std::vector<char> palInclude;      // per-palette shuffle inclusion (1=in)
+    float newStops[3][3] = { { 0.20f, 0.25f, 0.79f },   // new-palette editor:
+                             { 0.30f, 0.80f, 0.55f },   // three color stops,
+                             { 0.95f, 0.96f, 0.94f } };  // dark -> bright
+    std::wstring newName;              // new-palette name field
+    bool nameFocused = false;          // name field has keyboard focus
     int modeIdx = 0;
     int paletteIdx = 0;
     int resIdx = 0;          // index into RES_OPTS
@@ -580,17 +589,13 @@ struct App {
     }
 
     // (Re)create the WIC bitmap + D2D render target the UI overlay is drawn
-    // into. Capped at 1440 tall to bound the per-change texture upload; the
-    // aspect is preserved so deck hit-testing (in window pixels) stays aligned.
+    // into, at the native window size so overlay pixels map 1:1 to window
+    // pixels (exact hit-testing). It only re-renders/re-uploads when the UI
+    // changes (dirty-checked), so full-res is cheap.
     bool EnsureOverlayRT(int clientW, int clientH) {
         if (!wic) return false;
-        UINT w, h;
-        if (clientH <= 1440) { w = (UINT)(clientW > 0 ? clientW : 1); h = (UINT)(clientH > 0 ? clientH : 1); }
-        else {
-            h = 1440;
-            w = (UINT)((float)h * (float)clientW / (float)clientH + 0.5f);
-            if (w < 1) w = 1;
-        }
+        UINT w = (UINT)(clientW > 0 ? clientW : 1);
+        UINT h = (UINT)(clientH > 0 ? clientH : 1);
         if (olRT && olW == w && olH == h) return true;
         ReleaseOverlay();
         if (FAILED(wic->CreateBitmap(w, h, GUID_WICPixelFormat32bppPBGRA,
@@ -608,9 +613,16 @@ struct App {
     // the GL side. Returns true if the texture must be re-uploaded.
     bool BuildOverlay(int clientW, int clientH, const wchar_t* l1, const wchar_t* l2) {
         if (!EnsureOverlayRT(clientW, clientH)) return false;
-        wchar_t sig[900];
-        swprintf_s(sig, L"%u|%u|%d|%d|%d|%s|%s", olW, olH, deckVisible ? 1 : 0,
-                   deckHover, help ? 1 : 0, l1 ? l1 : L"", l2 ? l2 : L"");
+        std::wstring sig = std::to_wstring(olW) + L"|" + std::to_wstring(olH) + L"|" +
+            std::to_wstring(deckVisible) + L"|" + std::to_wstring(deckHover) + L"|" +
+            std::to_wstring(help) + L"|" + (l1 ? l1 : L"") + L"|" + (l2 ? l2 : L"");
+        if (palPanel) {   // capture everything the panel draws so it stays live
+            sig += L"|P" + std::to_wstring(shufflePalettes) + std::to_wstring(nameFocused) +
+                   std::to_wstring(paletteIdx) + L"|" + newName + L"|";
+            for (char v : palInclude) sig += (v ? L'1' : L'0');
+            for (int k = 0; k < 3; k++) for (int c = 0; c < 3; c++)
+                sig += L"." + std::to_wstring((int)(newStops[k][c] * 255));
+        }
         if (olSig == sig) return false; // unchanged — reuse the cached texture
         olSig = sig;
 
@@ -687,6 +699,7 @@ struct App {
             if (pmActive) pmHost.NextPreset(1);
             else if (shaderActive) shaderIdx = (shaderIdx + 1) % shaderHost.ShaderCount();
             else modeIdx = PickRandomMode();
+            if (shufflePalettes) paletteIdx = PickRandomIncludedPalette();
         }
 
         AudioFrame frame;
@@ -763,7 +776,7 @@ struct App {
         swprintf_s(l1, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d",
                    modeIdx + 1, MODE_COUNT, mode.name, PaletteName(), tap.SourceName(),
                    RES_OPTS[resIdx].name, offW, offH, SHUF[shuffleIdx], calm ? L"  CALM" : L"", fps);
-        swprintf_s(l2, L"SPACE/\x2190\x2192 cycle  P palette  N new  1-4 src  R res  S shuffle  C calm  M milk  G gpu  B spotify  F full  H hud  F1 help  ESC");
+        swprintf_s(l2, L"SPACE/\x2190\x2192 cycle  P palette  N palettes  1-4 src  R res  S shuffle  C calm  M milk  G gpu  B spotify  F full  H hud  F1 help  ESC");
         D2DPainter dp(rt, brush, hudFont, deckFont);
         DrawUI(dp, l1, l2);
 
@@ -852,6 +865,7 @@ struct App {
 
     // Mouse near the bottom edge reveals the deck; hovering keeps it alive.
     void OnMouseMove(int mx, int my) {
+        if (palPanel) return;  // panel is modal
         RECT rc; GetClientRect(hwnd, &rc);
         int hit = DeckHitTest(mx, my);
         if (my > rc.bottom - 110 || hit >= 0) { deckVisible = true; deckActivity = Now(); }
@@ -859,6 +873,7 @@ struct App {
     }
 
     void OnClick(int mx, int my) {
+        if (PanelClick(mx, my)) return;
         if (!deckVisible) return;
         int hit = DeckHitTest(mx, my);
         if (hit >= 0) { DeckDispatch(hit); deckActivity = Now(); }
@@ -874,6 +889,7 @@ struct App {
             if (l1) p.Text(16, 4, W - 32, 20, l1, 0.95f, 0.96f, 0.95f, 0.92f);
             if (l2) p.Text(16, 24, W - 32, 20, l2, 0.80f, 0.83f, 0.82f, 0.80f);
         }
+        if (palPanel) { DrawPalettePanel(p); return; }  // modal: hides deck
         if (deckVisible) DrawDeckP(p);
         if (help) DrawHelpP(p);
     }
@@ -904,7 +920,7 @@ struct App {
             L"SPACE / \x2192      next mode (or preset / shader)\n"
             L"\x2190              previous\n"
             L"P              cycle trace palette\n"
-            L"N              new custom palette (color picker)\n"
+            L"N              palettes + shuffle panel (edit / include)\n"
             L"1 / 2 / 3      source: system / mic / demo\n"
             L"4              open an audio file\n"
             L"M              MilkDrop engine (projectM)\n"
@@ -1083,7 +1099,176 @@ struct App {
         cp.name = nm;
         customPalettes.push_back(cp);
         paletteIdx = PAL_COUNT + (int)customPalettes.size() - 1;
+        EnsurePalInclude();
         SaveConfig();
+    }
+
+    // ----- palettes + shuffle panel (the web "PALETTES + SHUFFLE" window) -----
+
+    void EnsurePalInclude() {
+        int n = PaletteCount();
+        while ((int)palInclude.size() < n) palInclude.push_back(1);
+    }
+    const wchar_t* PalNameFor(int i) const {
+        return i < PAL_COUNT ? PALETTES[i].name : customPalettes[i - PAL_COUNT].name.c_str();
+    }
+    D2D1_COLOR_F (*PaletteFnFor(int i))(float, float) {
+        if (i < PAL_COUNT) return PALETTES[i].color;
+        const CustomPalette& cp = customPalettes[i - PAL_COUNT];
+        g_customStopCount = cp.n;
+        for (int a = 0; a < cp.n; a++) for (int c = 0; c < 3; c++) g_customStops[a][c] = cp.stops[a][c];
+        return PalCustom;
+    }
+    int PickRandomIncludedPalette() {
+        EnsurePalInclude();
+        int n = PaletteCount(), pool[64], c = 0;
+        for (int i = 0; i < n && c < 64; i++) if (palInclude[i]) pool[c++] = i;
+        return c ? pool[rand() % c] : paletteIdx;
+    }
+    void OpenPalettePanel() { palPanel = !palPanel; nameFocused = false; EnsurePalInclude(); }
+
+    // Open the standard picker for one of the new-palette color stops.
+    void PickStop(int k) {
+        static COLORREF custom[16] = {};
+        CHOOSECOLORW cc = {};
+        cc.lStructSize = sizeof(cc); cc.hwndOwner = hwnd; cc.lpCustColors = custom;
+        cc.rgbResult = RGB((int)(newStops[k][0] * 255), (int)(newStops[k][1] * 255), (int)(newStops[k][2] * 255));
+        cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+        if (ChooseColorW(&cc)) {
+            newStops[k][0] = GetRValue(cc.rgbResult) / 255.0f;
+            newStops[k][1] = GetGValue(cc.rgbResult) / 255.0f;
+            newStops[k][2] = GetBValue(cc.rgbResult) / 255.0f;
+        }
+    }
+    void AddNewPalette() {
+        CustomPalette cp; cp.n = 3;
+        for (int k = 0; k < 3; k++) for (int c = 0; c < 3; c++) cp.stops[k][c] = newStops[k][c];
+        if (!newName.empty()) cp.name = newName;
+        else { wchar_t nm[24]; swprintf_s(nm, L"CUSTOM %d", (int)customPalettes.size() + 1); cp.name = nm; }
+        customPalettes.push_back(cp);
+        palInclude.push_back(1);
+        paletteIdx = PAL_COUNT + (int)customPalettes.size() - 1;
+        newName.clear(); nameFocused = false;
+        SaveConfig();
+    }
+    // Keystrokes for the name field while the panel is open.
+    void PanelChar(wchar_t c) {
+        if (!palPanel || !nameFocused) return;
+        if (c == 8) { if (!newName.empty()) newName.pop_back(); }
+        else if (c == 13) AddNewPalette();
+        else if (c >= 32 && newName.size() < 22) newName += c;
+    }
+
+    struct PalRects {
+        D2D1_RECT_F card, close, master, swatch[3], preview, nameBox, addBtn;
+        D2D1_RECT_F row[64];
+        int rows = 0;
+        float dividerY = 0, newHeadY = 0, newDescY = 0;
+    };
+    void PalLayout(float W, float H, PalRects& r) {
+        EnsurePalInclude();
+        int n = PaletteCount(); if (n > 64) n = 64;
+        r.rows = n;
+        const float pw = 462, pad = 28, rowH = 26;
+        float ph = 344 + n * rowH;
+        float px = (W - pw) * 0.5f, py = (H - ph) * 0.5f;
+        if (py < 12) py = 12;
+        r.card = D2D1::RectF(px, py, px + pw, py + ph);
+        float x = px + pad;
+        r.close = D2D1::RectF(px + pw - pad - 44, py + 16, px + pw - pad, py + 38);
+        r.master = D2D1::RectF(x, py + 64, x + 20, py + 84);
+        float y = py + 132;
+        for (int i = 0; i < n; i++) { r.row[i] = D2D1::RectF(x, y, px + pw - pad, y + rowH - 4); y += rowH; }
+        r.dividerY = y + 12; y += 26;
+        r.newHeadY = y; y += 30;
+        r.newDescY = y; y += 42;
+        for (int k = 0; k < 3; k++) { float sx = x + k * 60; r.swatch[k] = D2D1::RectF(sx, y, sx + 52, y + 40); }
+        r.preview = D2D1::RectF(x + 3 * 60 + 12, y, px + pw - pad, y + 40);
+        y += 52;
+        r.nameBox = D2D1::RectF(x, y, x + 250, y + 34);
+        r.addBtn = D2D1::RectF(px + pw - pad - 116, y, px + pw - pad, y + 34);
+    }
+
+    static bool In(const D2D1_RECT_F& b, int mx, int my) {
+        return mx >= b.left && mx <= b.right && my >= b.top && my <= b.bottom;
+    }
+    void DrawCheck(UIPainter& p, const D2D1_RECT_F& b, bool on) {
+        float w = b.right - b.left, h = b.bottom - b.top;
+        p.Rect(b.left, b.top, w, h, 0.16f, 0.18f, 0.21f, 0.95f);
+        if (on) p.Rect(b.left + 3, b.top + 3, w - 6, h - 6, 0.30f, 0.60f, 0.95f, 1.0f);
+    }
+    void DrawGrad(UIPainter& p, float x, float y, float w, float h, D2D1_COLOR_F (*fn)(float, float)) {
+        const int N = 48; float sw = w / (float)N;
+        for (int i = 0; i < N; i++) {
+            float t = (i + 0.5f) / N;
+            D2D1_COLOR_F c = fn ? fn(t, 1.0f) : D2D1::ColorF(0);
+            p.Rect(x + i * sw, y, sw + 1.0f, h, c.r, c.g, c.b, 1.0f);
+        }
+    }
+    void DrawPalettePanel(UIPainter& p) {
+        PalRects r; PalLayout(p.W(), p.H(), r);
+        p.Rect(0, 0, p.W(), p.H(), 0, 0, 0, 0.5f);                       // scrim
+        p.Rect(r.card.left, r.card.top, r.card.right - r.card.left, r.card.bottom - r.card.top,
+               0.04f, 0.05f, 0.06f, 0.98f, true);
+        float cx = r.card.left + 28;
+        p.Text(cx, r.card.top + 14, 340, 22, L"PALETTES + SHUFFLE", 0.35f, 0.62f, 0.95f, 1.0f);
+        p.Text(r.close.left - 6, r.close.top, 60, 22, L"close", 0.72f, 0.74f, 0.76f, 0.9f);
+        DrawCheck(p, r.master, shufflePalettes);
+        p.Text(r.master.right + 12, r.master.top - 2, 340, 22, L"Shuffle palettes too", 0.92f, 0.93f, 0.94f, 0.96f);
+        p.Text(cx, r.master.bottom + 4, 406, 40,
+               L"Each shuffle tick also picks a random trace\npalette from the checked list below.",
+               0.60f, 0.63f, 0.66f, 0.92f);
+        for (int i = 0; i < r.rows; i++) {
+            const D2D1_RECT_F& row = r.row[i];
+            DrawCheck(p, D2D1::RectF(row.left, row.top + 1, row.left + 18, row.top + 19), palInclude[i] != 0);
+            DrawGrad(p, row.left + 30, row.top + 2, 190, 17, PaletteFnFor(i));
+            bool active = (i == paletteIdx);
+            p.Text(row.left + 232, row.top - 1, 200, 22, PalNameFor(i),
+                   active ? 0.45f : 0.86f, active ? 0.70f : 0.88f, active ? 1.0f : 0.90f, 0.95f);
+        }
+        p.Rect(cx, r.dividerY, r.card.right - 28 - cx, 1, 0.25f, 0.28f, 0.32f, 0.8f);
+        p.Text(cx, r.newHeadY, 300, 24, L"New palette", 0.92f, 0.93f, 0.94f, 0.96f);
+        p.Text(cx, r.newDescY, 406, 40,
+               L"Three color stops, blended dark to bright across\neach visualizer.",
+               0.60f, 0.63f, 0.66f, 0.92f);
+        for (int k = 0; k < 3; k++) {
+            const D2D1_RECT_F& s = r.swatch[k];
+            p.Rect(s.left, s.top, s.right - s.left, s.bottom - s.top,
+                   newStops[k][0], newStops[k][1], newStops[k][2], 1.0f, true);
+        }
+        g_customStopCount = 3;
+        for (int k = 0; k < 3; k++) for (int c = 0; c < 3; c++) g_customStops[k][c] = newStops[k][c];
+        DrawGrad(p, r.preview.left, r.preview.top, r.preview.right - r.preview.left,
+                 r.preview.bottom - r.preview.top, PalCustom);
+        p.Rect(r.nameBox.left, r.nameBox.top, r.nameBox.right - r.nameBox.left,
+               r.nameBox.bottom - r.nameBox.top, 0.10f, 0.11f, 0.13f, 0.96f, true);
+        bool placeholder = newName.empty() && !nameFocused;
+        std::wstring shown = placeholder ? L"Palette name" : (newName + (nameFocused ? L"_" : L""));
+        p.Text(r.nameBox.left + 10, r.nameBox.top + 6, 230, 22, shown.c_str(),
+               placeholder ? 0.5f : 0.92f, placeholder ? 0.52f : 0.93f, placeholder ? 0.54f : 0.94f, 0.95f);
+        p.Rect(r.addBtn.left, r.addBtn.top, r.addBtn.right - r.addBtn.left,
+               r.addBtn.bottom - r.addBtn.top, 0.16f, 0.34f, 0.62f, 0.98f, true);
+        p.Text(r.addBtn.left, r.addBtn.top, r.addBtn.right - r.addBtn.left, r.addBtn.bottom - r.addBtn.top,
+               L"add palette", 1.0f, 1.0f, 1.0f, 0.98f, true);
+    }
+    // Handle a click while the panel is open. Returns true if consumed.
+    bool PanelClick(int mx, int my) {
+        if (!palPanel) return false;
+        D2D1_SIZE_F sz = rt->GetSize();
+        PalRects r; PalLayout(sz.width, sz.height, r);
+        if (In(r.close, mx, my)) { palPanel = false; return true; }
+        if (In(r.master, mx, my)) { shufflePalettes = !shufflePalettes; SaveConfig(); return true; }
+        for (int i = 0; i < r.rows; i++) if (In(r.row[i], mx, my)) {
+            if (mx <= r.row[i].left + 24) { palInclude[i] = !palInclude[i]; SaveConfig(); }
+            else paletteIdx = i;
+            return true;
+        }
+        for (int k = 0; k < 3; k++) if (In(r.swatch[k], mx, my)) { PickStop(k); return true; }
+        if (In(r.nameBox, mx, my)) { nameFocused = true; return true; }
+        if (In(r.addBtn, mx, my)) { AddNewPalette(); return true; }
+        nameFocused = false;
+        if (!In(r.card, mx, my)) palPanel = false; // click outside closes
+        return true; // swallow clicks while the panel is up
     }
 
     // ----- settings persistence (spectraviz.ini beside the exe) -----
@@ -1098,6 +1283,11 @@ struct App {
         };
         wi(L"mode", modeIdx); wi(L"palette", paletteIdx); wi(L"resolution", resIdx);
         wi(L"shuffle", shuffleIdx); wi(L"calm", calm ? 1 : 0); wi(L"shader", shaderIdx);
+        wi(L"shufflePal", shufflePalettes ? 1 : 0);
+        EnsurePalInclude();
+        std::wstring inc;
+        for (char v : palInclude) inc += (v ? L'1' : L'0');
+        WritePrivateProfileStringW(L"settings", L"palInclude", inc.c_str(), path.c_str());
         wchar_t cnt[16]; _itow_s((int)customPalettes.size(), cnt, 10);
         WritePrivateProfileStringW(L"palettes", L"count", cnt, path.c_str());
         for (size_t i = 0; i < customPalettes.size(); i++) {
@@ -1150,6 +1340,12 @@ struct App {
         shuffleIdx = Clampi(GetPrivateProfileIntW(L"settings", L"shuffle", 0, path.c_str()), 0, SHUFFLE_COUNT - 1);
         calm = GetPrivateProfileIntW(L"settings", L"calm", 0, path.c_str()) != 0;
         shaderIdx = Clampi(GetPrivateProfileIntW(L"settings", L"shader", 0, path.c_str()), 0, SV_COUNT - 1);
+        shufflePalettes = GetPrivateProfileIntW(L"settings", L"shufflePal", 0, path.c_str()) != 0;
+        wchar_t inc[128];
+        GetPrivateProfileStringW(L"settings", L"palInclude", L"", inc, 128, path.c_str());
+        palInclude.clear();
+        for (wchar_t* q = inc; *q; ++q) palInclude.push_back(*q == L'0' ? 0 : 1);
+        EnsurePalInclude(); // new palettes default to included
     }
 
     // Release everything this window owns (GL hosts, audio tap, D2D).
@@ -1276,7 +1472,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             else a->CycleMode(-1);
             break;
         case 'P':      a->CyclePalette(); break;
-        case 'N':      a->NewPalette(); break;
+        case 'N':      a->OpenPalettePanel(); break;
         case '1':      a->tap.SetSource(AudioTap::SRC_LOOPBACK); break;
         case '2':      a->tap.SetSource(AudioTap::SRC_MIC); break;
         case '3':      a->tap.SetSource(AudioTap::SRC_DEMO); break;
@@ -1292,8 +1488,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'H':      a->hud = !a->hud; break;
         case VK_F1:    a->help = !a->help; break;
         case VK_OEM_2: if (GetKeyState(VK_SHIFT) & 0x8000) a->help = !a->help; break; // '?'
-        case VK_ESCAPE: PostQuitMessage(0); break;  // ESC on any window quits all
+        case VK_ESCAPE:
+            if (a->palPanel) a->palPanel = false;      // ESC closes the panel first
+            else PostQuitMessage(0);
+            break;
         }
+        return 0;
+    case WM_CHAR:
+        a->PanelChar((wchar_t)wp);
         return 0;
     case WM_TRAY:
         if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {
