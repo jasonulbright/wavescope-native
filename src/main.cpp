@@ -129,32 +129,40 @@ public:
         m_source = SRC_FILE;
     }
 
-    // Copy up to `maxn` samples that arrived after `cursor` (oldest first),
-    // advancing the cursor — the projectM feed, which must see each sample
-    // exactly once, not a re-sent sliding window. On the demo source the
-    // signal is synthesized at real-time pace instead.
-    int ReadNew(uint64_t& cursor, float* out, int maxn, float now) {
+    // A consumer's read position into the tap. Each consumer (projectM feed,
+    // recorder) owns one, including its own demo-synthesis clock.
+    struct TapCursor { uint64_t idx = 0; double demoMs = 0; };
+
+    // Copy up to `maxn` samples that arrived after the cursor (oldest first),
+    // advancing it — for consumers that must see each sample exactly once,
+    // not a re-sent sliding window. On the demo source the signal is
+    // synthesized at real-time pace instead.
+    int ReadNew(TapCursor& c, float* out, int maxn) {
         if (m_source.load() == SRC_DEMO) {
-            float sr = (float)(m_sampleRate ? m_sampleRate : 48000);
-            if (m_demoFeedT == 0.0) m_demoFeedT = now;
-            int n = (int)((now - (float)m_demoFeedT) * sr);
+            double sr = (double)(m_sampleRate ? m_sampleRate : 48000);
+            double nowMs = (double)GetTickCount64();
+            if (c.demoMs == 0.0) c.demoMs = nowMs;
+            int n = (int)((nowMs - c.demoMs) * sr / 1000.0);
             if (n <= 0) return 0;
-            if (n > maxn) { m_demoFeedT = now - (double)maxn / sr; n = maxn; }
-            float cents[5]; DemoDetune((float)m_demoFeedT, cents);
+            if (n > maxn) { c.demoMs = nowMs - (double)maxn * 1000.0 / sr; n = maxn; }
+            double t0 = c.demoMs / 1000.0;
+            // Wrap the detune LFO clock to keep float trig accurate on long
+            // uptimes; one tiny wobble discontinuity every ~8 h is invisible.
+            float cents[5]; DemoDetune((float)fmod(t0, 30000.0), cents);
             for (int i = 0; i < n; i++)
-                out[i] = DemoSynth(m_demoFeedT + (double)i / sr, cents);
-            m_demoFeedT += (double)n / sr;
+                out[i] = DemoSynth(t0 + (double)i / sr, cents);
+            c.demoMs += (double)n * 1000.0 / sr;
             return n;
         }
         AcquireSRWLockShared(&m_lock);
         uint64_t w = m_writeIdx;
-        if (cursor > w) cursor = w;
-        uint64_t avail = w - cursor;
-        if (avail > (uint64_t)RING) { cursor = w - RING; avail = RING; } // overran: skip ahead
+        if (c.idx > w) c.idx = w;
+        uint64_t avail = w - c.idx;
+        if (avail > (uint64_t)RING) { c.idx = w - RING; avail = RING; } // overran: skip ahead
         int n = (int)(avail < (uint64_t)maxn ? avail : (uint64_t)maxn);
-        for (int i = 0; i < n; i++) out[i] = m_ring[(cursor + i) % RING];
+        for (int i = 0; i < n; i++) out[i] = m_ring[(c.idx + i) % RING];
         ReleaseSRWLockShared(&m_lock);
-        cursor += n;
+        c.idx += n;
         return n;
     }
 
@@ -558,7 +566,6 @@ private:
     UINT32 m_sampleRate = 48000;
     float m_smooth[1024] = {};
     float m_level = 0, m_bassAvg = 0, m_beat = 0, m_lastT = 0;
-    double m_demoFeedT = 0;   // ReadNew's real-time cursor on the demo source
     wchar_t m_filePath[MAX_PATH] = {};
 };
 
@@ -582,6 +589,7 @@ static float BinLog(const AudioFrame& f, float pos) {
 #include "projectm_host.inl"
 #include "shader_host.inl"
 #include "spotify.inl"
+#include "record.inl"
 
 // --------------------------------------------------------------------- app
 
@@ -619,7 +627,14 @@ struct App {
     HINSTANCE inst = nullptr;
     ProjectMHost pmHost;
     bool pmActive = false;
-    uint64_t pmPcmCursor = 0;   // read position into the tap for the PCM feed
+    AudioTap::TapCursor pmCursor;   // read position into the tap for the PCM feed
+    Recorder rec;
+    std::vector<uint8_t> recScratch;         // GL readback for the recorder
+    IWICBitmap* recBmp = nullptr;            // built-in engine records through a
+    ID2D1RenderTarget* recRT = nullptr;      // WIC (CPU) offscreen: same draws,
+    ID2D1SolidColorBrush* recBrush = nullptr;// lockable pixels
+    ID2D1Bitmap* recPresent = nullptr;       // cached upload for presenting it
+    UINT recW = 0, recH = 0;
     ShaderHost shaderHost;
     bool shaderActive = false;
     int shaderIdx = 0;       // index into the GPU shader modes
@@ -788,6 +803,61 @@ struct App {
         offW = offH = 0;
     }
 
+    void ReleaseRecOffscreen() {
+        SafeRelease(&recPresent);
+        SafeRelease(&recBrush);
+        SafeRelease(&recRT);
+        SafeRelease(&recBmp);
+        recW = recH = 0;
+    }
+
+    // The CPU-side offscreen the built-in engine renders through while
+    // recording, sized like the normal offscreen.
+    bool EnsureRecOffscreen() {
+        if (!wic || !offscreen) return false;
+        if (recRT && recW == offW && recH == offH) return true;
+        ReleaseRecOffscreen();
+        if (FAILED(wic->CreateBitmap(offW, offH, GUID_WICPixelFormat32bppPBGRA,
+                                     WICBitmapCacheOnLoad, &recBmp))) return false;
+        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            96.0f, 96.0f);
+        if (FAILED(d2d->CreateWicBitmapRenderTarget(recBmp, props, &recRT))) {
+            ReleaseRecOffscreen(); return false;
+        }
+        recRT->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &recBrush);
+        recW = offW; recH = offH;
+        return true;
+    }
+
+    // Cached window-target bitmap the recorded frame presents through.
+    bool EnsureRecPresent() {
+        if (recPresent) {
+            D2D1_SIZE_U s = recPresent->GetPixelSize();
+            if (s.width == recW && s.height == recH) return true;
+            SafeRelease(&recPresent);
+        }
+        D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
+        return SUCCEEDED(rt->CreateBitmap(D2D1::SizeU(recW, recH), props, &recPresent));
+    }
+
+    // R: start/stop the MP4 clip. Records the active engine's render target
+    // at its current size (offscreen resolution for built-ins, client pixels
+    // for the GL engines) plus the analysed audio.
+    void ToggleRecord() {
+        if (rec.Active()) { rec.Stop(); ReleaseRecOffscreen(); return; }
+        RECT rc; GetClientRect(hwnd, &rc);
+        int w = rc.right, h = rc.bottom;
+        if (!pmActive && !shaderActive) {
+            EnsureOffscreen(rc.right, rc.bottom);
+            w = (int)offW; h = (int)offH;
+        }
+        if (!rec.Start(w, h, tap.SampleRate(), &tap))
+            SetWindowTextW(hwnd, L"WaveScope  (recording failed to start)");
+    }
+
     // The offscreen target the modes draw into, sized to the resolution
     // setting; it holds the phosphor-trail content between frames.
     bool EnsureOffscreen(int clientW, int clientH) {
@@ -813,6 +883,7 @@ struct App {
 
     bool CreateTarget() {
         SafeRelease(&brush);
+        SafeRelease(&recPresent); // created on the old rt
         SafeRelease(&rt);
         ReleaseOffscreen(); // tied to the old rt via CreateCompatibleRenderTarget
         RECT rc;
@@ -878,7 +949,11 @@ struct App {
                 off += _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\nSHUF %s", SHUF_LABELS[shuffleIdx]);
             std::wstring np = g_spotify.NowPlaying();
             if (!np.empty())
-                _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\n\x266A %s", np.c_str());
+                off += _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\n\x266A %s", np.c_str());
+            if (rec.Active()) {
+                int s = (int)rec.Seconds();
+                _snwprintf_s(extra + off, 220 - off, _TRUNCATE, L"\n\x25CF REC %02d:%02d", s / 60, s % 60);
+            }
         }
 
         if (pmActive && pmHost.ready) {
@@ -890,9 +965,14 @@ struct App {
                        RES_OPTS[resIdx].name, fps, extra);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             float pcm[4800];   // up to 100 ms of new samples per frame
-            int newN = tap.ReadNew(pmPcmCursor, pcm, 4800, now);
+            int newN = tap.ReadNew(pmCursor, pcm, 4800);
             pmHost.RenderEngine(pcm, newN);
             if (pmHost.lost == 0) {
+                if (rec.Active()) {   // pre-UI frame for the clip
+                    int rw = 0, rh = 0;
+                    if (pmHost.ReadBack(recScratch, rw, rh))
+                        rec.PushVideo(recScratch.data(), rw, rh);
+                }
                 pmHost.BeginOverlay();
                 pmHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
                 pmHost.Present();
@@ -912,6 +992,11 @@ struct App {
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             shaderHost.RenderEngine(shaderIdx, frame);
             if (shaderHost.lost == 0) {
+                if (rec.Active()) {   // pre-UI frame for the clip
+                    int rw = 0, rh = 0;
+                    if (shaderHost.ReadBack(recScratch, rw, rh))
+                        rec.PushVideo(recScratch.data(), rw, rh);
+                }
                 shaderHost.BeginOverlay();
                 shaderHost.DrawOverlayTex(olPixels.empty() ? nullptr : olPixels.data(), (int)olW, (int)olH, dirty);
                 shaderHost.Present();
@@ -928,25 +1013,64 @@ struct App {
         RECT rc; GetClientRect(hwnd, &rc);
         EnsureOffscreen(rc.right, rc.bottom);
 
-        // Draw the visualizer into the offscreen target at the chosen
-        // resolution. It retains its content between frames, so the fade wash
-        // produces phosphor trails.
-        offscreen->BeginDraw();
-        offBrush->SetColor(D2D1::ColorF(0.043f, 0.051f, 0.047f, mode.fade));
-        offscreen->FillRectangle(D2D1::RectF(0, 0, (float)offW, (float)offH), offBrush);
-        DrawCtx g{ offscreen, d2d, offBrush, PaletteFn(), (float)offW, (float)offH,
-                   &frame, &viz, &blitCache };
-        mode.draw(g);
-        offscreen->EndDraw();
+        bool recording = rec.Active() && EnsureRecOffscreen();
+        if (recording) {
+            // While recording, the modes draw into a WIC (CPU) offscreen of
+            // the same size: identical calls, retained trails, lockable
+            // pixels for the encoder. One draw per frame — mode state
+            // advances exactly once.
+            recRT->BeginDraw();
+            recBrush->SetColor(D2D1::ColorF(0.043f, 0.051f, 0.047f, mode.fade));
+            recRT->FillRectangle(D2D1::RectF(0, 0, (float)recW, (float)recH), recBrush);
+            DrawCtx g{ recRT, d2d, recBrush, PaletteFn(), (float)recW, (float)recH,
+                       &frame, &viz, nullptr };
+            mode.draw(g);
+            recRT->EndDraw();
+            WICRect wrc = { 0, 0, (INT)recW, (INT)recH };
+            IWICBitmapLock* lock = nullptr;
+            if (SUCCEEDED(recBmp->Lock(&wrc, WICBitmapLockRead, &lock))) {
+                UINT cb = 0; BYTE* data = nullptr;
+                lock->GetDataPointer(&cb, &data);
+                rec.PushVideo(data, (int)recW, (int)recH, true);   // top-down
+                lock->Release();
+            }
+        } else {
+            // Draw the visualizer into the offscreen target at the chosen
+            // resolution. It retains its content between frames, so the fade
+            // wash produces phosphor trails.
+            offscreen->BeginDraw();
+            offBrush->SetColor(D2D1::ColorF(0.043f, 0.051f, 0.047f, mode.fade));
+            offscreen->FillRectangle(D2D1::RectF(0, 0, (float)offW, (float)offH), offBrush);
+            DrawCtx g{ offscreen, d2d, offBrush, PaletteFn(), (float)offW, (float)offH,
+                       &frame, &viz, &blitCache };
+            mode.draw(g);
+            offscreen->EndDraw();
+        }
 
-        // Present: blit the offscreen scaled to the window, then the HUD.
+        // Present: blit the frame scaled to the window, then the HUD.
         rt->BeginDraw();
-        ID2D1Bitmap* bmp = nullptr;
-        offscreen->GetBitmap(&bmp);
-        if (bmp) {
-            rt->DrawBitmap(bmp, D2D1::RectF(0, 0, size.width, size.height), 1.0f,
-                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-            bmp->Release();
+        if (recording) {
+            if (EnsureRecPresent()) {
+                WICRect wrc = { 0, 0, (INT)recW, (INT)recH };
+                IWICBitmapLock* lock = nullptr;
+                if (SUCCEEDED(recBmp->Lock(&wrc, WICBitmapLockRead, &lock))) {
+                    UINT cb = 0; BYTE* data = nullptr;
+                    lock->GetDataPointer(&cb, &data);
+                    D2D1_RECT_U all = { 0, 0, recW, recH };
+                    recPresent->CopyFromMemory(&all, data, recW * 4);
+                    lock->Release();
+                }
+                rt->DrawBitmap(recPresent, D2D1::RectF(0, 0, size.width, size.height), 1.0f,
+                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            }
+        } else {
+            ID2D1Bitmap* bmp = nullptr;
+            offscreen->GetBitmap(&bmp);
+            if (bmp) {
+                rt->DrawBitmap(bmp, D2D1::RectF(0, 0, size.width, size.height), 1.0f,
+                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                bmp->Release();
+            }
         }
 
         wchar_t l1[512];
@@ -1434,6 +1558,7 @@ struct App {
             L"1 / 2 / 3      source: system / mic / demo\n"
             L"4              open an audio file\n"
             L"M              displays (pick a monitor)\n"
+            L"R              record clip -> wavescope-<time>.mp4 (H.264+AAC)\n"
             L"B              Spotify: authorize + start playback (Premium)\n"
             L"S              shuffle timer (off / 15s / 30s / 1m / 5m / DJ)\n"
             L"C              calm mode (photosensitive-safe)\n"
@@ -1918,6 +2043,8 @@ struct App {
 
     // Release everything this window owns (GL hosts, audio tap, D2D).
     void Shutdown() {
+        rec.Stop();
+        ReleaseRecOffscreen();
         shaderHost.Destroy();
         pmHost.Destroy();
         tap.Stop();
@@ -2081,6 +2208,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case 'E':      a->CycleEngine(); break;       // WaveScope -> GPU -> projectM
         case 'G':      a->ToggleShader(); break;      // jump straight to GPU
+        case 'R':      a->ToggleRecord(); break;      // web parity: R = record
         case 'B':      g_spotify.OneButton(); break;  // Spotify: authorize + play
         case 'F':      a->ToggleFullscreen(); break;
         case 'H':      a->hud = !a->hud; break;
