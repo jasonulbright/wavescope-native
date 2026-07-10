@@ -83,6 +83,71 @@ static bool StCaptureWindow(HWND hwnd, std::vector<uint8_t>& out, int& w, int& h
     return ok;
 }
 
+// Re-open a recorded MP4 and report duration, size, audio presence; dump a
+// decoded mid-file frame (assumed top-down for the PNG — eyeball the bars).
+static bool StVerifyMp4(const wchar_t* path, const wchar_t* framePng,
+                        double& durSec, UINT32& w, UINT32& h, bool& hasAudio) {
+    durSec = 0; w = h = 0; hasAudio = false;
+    MFStartup(MF_VERSION, MFSTARTUP_LITE);
+    IMFSourceReader* rd = nullptr;
+    bool ok = false;
+    // Advanced video processing lets the reader hand H.264 back as RGB32.
+    IMFAttributes* attr = nullptr;
+    MFCreateAttributes(&attr, 1);
+    if (attr) attr->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
+    HRESULT openHr = MFCreateSourceReaderFromURL(path, attr, &rd);
+    if (attr) attr->Release();
+    if (SUCCEEDED(openHr) && rd) {
+        PROPVARIANT var; PropVariantInit(&var);
+        if (SUCCEEDED(rd->GetPresentationAttribute((DWORD)MF_SOURCE_READER_MEDIASOURCE,
+                                                   MF_PD_DURATION, &var)) && var.vt == VT_UI8)
+            durSec = (double)var.uhVal.QuadPart / 1e7;
+        PropVariantClear(&var);
+        IMFMediaType* nat = nullptr;
+        hasAudio = SUCCEEDED(rd->GetNativeMediaType((DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0, &nat));
+        if (nat) { nat->Release(); nat = nullptr; }
+        // Decode video to RGB32 and pull a frame from mid-file.
+        IMFMediaType* mt = nullptr; MFCreateMediaType(&mt);
+        mt->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        mt->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+        if (SUCCEEDED(rd->SetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, mt))) {
+            IMFMediaType* cur = nullptr;
+            if (SUCCEEDED(rd->GetCurrentMediaType((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, &cur))) {
+                MFGetAttributeSize(cur, MF_MT_FRAME_SIZE, &w, &h);
+                cur->Release();
+            }
+            PROPVARIANT pos; PropVariantInit(&pos);
+            pos.vt = VT_I8; pos.hVal.QuadPart = 5000000;   // 0.5 s in
+            rd->SetCurrentPosition(GUID_NULL, pos);
+            PropVariantClear(&pos);
+            for (int tries = 0; tries < 10; tries++) {
+                DWORD flags = 0; IMFSample* smp = nullptr;
+                if (FAILED(rd->ReadSample((DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0,
+                                          nullptr, &flags, nullptr, &smp))) break;
+                if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
+                if (!smp) continue;
+                IMFMediaBuffer* buf = nullptr;
+                if (SUCCEEDED(smp->ConvertToContiguousBuffer(&buf)) && buf) {
+                    BYTE* data = nullptr; DWORD len = 0;
+                    if (SUCCEEDED(buf->Lock(&data, nullptr, &len)) &&
+                        len >= (DWORD)(w * h * 4) && w && h) {
+                        StWritePng(framePng, data, w, h, false);
+                        ok = true;
+                    }
+                    if (data) buf->Unlock();
+                    buf->Release();
+                }
+                smp->Release();
+                if (ok) break;
+            }
+        }
+        mt->Release();
+        rd->Release();
+    }
+    MFShutdown();
+    return ok;
+}
+
 // Drive one view through every engine on the demo signal; verify output.
 static int RunSelfTest(App* v) {
     std::wstring dir = PmExeDir();
@@ -127,6 +192,31 @@ static int RunSelfTest(App* v) {
         out(L"builtin: mode=%s %dx%d fps=%.0f lit=%.1f%% -> %s",
             MODES[v->modeIdx].name, w, h, fps, lit, pass ? L"PASS" : L"FAIL");
         if (!pass) rc = 1;
+    }
+
+    // --- clip recording (built-in engine, BARS: bright at the bottom) ---
+    {
+        v->modeIdx = 0;
+        for (int i = 0; i < 20; i++) { pump(); v->Render(); }
+        v->ToggleRecord();
+        if (!v->rec.Active()) {
+            out(L"record: sink writer failed to start -> FAIL");
+            rc = 1;
+        } else {
+            std::wstring mp4 = v->rec.Path();
+            float r0 = v->Now();
+            while (v->Now() - r0 < 1.6f) { pump(); v->Render(); }
+            v->ToggleRecord();   // stop + finalize (joins the writer)
+            double dur = 0; UINT32 vw = 0, vh = 0; bool hasAudio = false;
+            bool frameOk = StVerifyMp4(mp4.c_str(), (dir + L"selftest-record-frame.png").c_str(),
+                                       dur, vw, vh, hasAudio);
+            bool pass = frameOk && dur > 0.8 && vw > 0 && hasAudio;
+            out(L"record: %s dur=%.2fs %ux%u audio=%d frame=%d -> %s",
+                mp4.c_str(), dur, vw, vh, hasAudio ? 1 : 0, frameOk ? 1 : 0,
+                pass ? L"PASS" : L"FAIL");
+            if (!pass) rc = 1;
+        }
+        v->modeIdx = keepMode;
     }
 
     // --- GPU shader engine ---
@@ -176,7 +266,7 @@ static int RunSelfTest(App* v) {
     } else {
         for (int i = 0; i < 60; i++) { pump(); v->Render(); }
         float pcm[4800];
-        int n = v->tap.ReadNew(v->pmPcmCursor, pcm, 4800, v->Now());
+        int n = v->tap.ReadNew(v->pmCursor, pcm, 4800);
         v->pmHost.RenderEngine(pcm, n);
         std::vector<uint8_t> px; int w = 0, h = 0;
         bool cap = v->pmHost.ReadBack(px, w, h);
