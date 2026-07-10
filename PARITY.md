@@ -89,11 +89,11 @@ walkthrough (`DEMO-CHECKLIST.md`).
 | Always-on-top toggle | done | T + tray menu |
 | Launch at login (HKCU Run, off by default) | done | |
 | Auto-DJ | done | = DJ shuffle |
-| Spout2 sender (OBS texture share) | ASK OWNER | third-party dep; brief requires explicit approval — not built |
+| Spout2 sender (OBS texture share) | done | owner-approved; O key, sender "WaveScope", vendored pinned SDK subset (third_party/spout), selftest does an in-process receiver roundtrip |
 
 ## Explicitly N/A on desktop
 
-PWA/service worker; `?embed=1` (always-on-top covers the overlay use; Spout
-is the OBS answer, pending approval); Butterchurn engine; browser capability
+PWA/service worker; `?embed=1` (always-on-top covers the overlay use; the
+Spout sender is the OBS answer); Butterchurn engine; browser capability
 gating; landing/marketing page; reduced-motion fallback (calm mode covers
 the intent).

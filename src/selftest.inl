@@ -219,6 +219,47 @@ static int RunSelfTest(App* v) {
         v->modeIdx = keepMode;
     }
 
+    // --- Spout output (shared-texture roundtrip, in-process receiver) ---
+    {
+        v->modeIdx = 0;   // BARS again: obviously-lit frames
+        v->ToggleSpout();
+        if (!v->spout.on) {
+            out(L"spout: sender failed to start -> FAIL");
+            rc = 1;
+        } else {
+            spoutDX rx;
+            bool rxOk = rx.OpenDirectX11();
+            rx.SetReceiverName("WaveScope");
+            std::vector<uint8_t> px;
+            unsigned int rw = 0, rh = 0;
+            bool got = false;
+            float lit = 0;
+            // Render/pump until the receiver connects, resizes, and a real
+            // frame lands (the double-staging pipeline needs a few frames).
+            for (int i = 0; i < 120 && rxOk; i++) {
+                pump(); v->Render();
+                if (rx.ReceiveImage(px.empty() ? nullptr : px.data(), rw, rh)) {
+                    if (rx.IsUpdated()) {
+                        rw = rx.GetSenderWidth();
+                        rh = rx.GetSenderHeight();
+                        px.assign((size_t)rw * rh * 4, 0);
+                    } else if (!px.empty() && i > 20) {
+                        lit = StLitPct(px.data(), px.size());
+                        if (lit > 0.2f) { got = true; break; }
+                    }
+                }
+            }
+            bool pass = rxOk && got && rw > 0 && rh > 0;
+            out(L"spout: sender=WaveScope %ux%u lit=%.1f%% roundtrip=%d -> %s",
+                rw, rh, lit, got ? 1 : 0, pass ? L"PASS" : L"FAIL");
+            if (!pass) rc = 1;
+            rx.ReleaseReceiver();
+            rx.CloseDirectX11();
+            v->ToggleSpout();
+        }
+        v->modeIdx = keepMode;
+    }
+
     // --- GPU shader engine ---
     v->ToggleShader();
     if (!v->shaderActive || !v->shaderHost.ready) {

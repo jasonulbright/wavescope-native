@@ -52,6 +52,13 @@ must print `tests: ALL PASS`), then `WaveScope.exe selftest` (must print
 - [ ] Open the file in Media Player. → Correct orientation, matches what was
       on screen (without the UI), audio in sync.
 
+## 4b. OBS via Spout (optional, 30 s — needs OBS + obs-spout2-plugin)
+
+- [ ] Press `O`. → HUD shows `SPOUT OUT`. In OBS, add a *Spout2 Capture*
+      source → sender "WaveScope" appears; the live visual (without the
+      UI) streams into OBS.
+- [ ] Press `O` again. → HUD line clears, the OBS source goes idle.
+
 ## 5. Displays + window management (45 s)
 
 - [ ] Press `M`, pick another `DISPLAY n` (if present). → The window jumps

@@ -17,13 +17,20 @@ if %errorlevel% neq 0 exit /b %errorlevel%
 if %errorlevel% neq 0 exit /b %errorlevel%
 del tests.obj >nul 2>&1
 
+rem Spout (third_party\spout, pinned - see PIN.md) compiles in for the O
+rem output; d3d11/dxgi come with it.
 cl /nologo /std:c++20 /O2 /MT /EHsc /W3 /DUNICODE /D_UNICODE ^
+   /D_CRT_SECURE_NO_WARNINGS ^
    /I "%PMROOT%\include" ^
    src\main.cpp ^
+   third_party\spout\SpoutDX.cpp third_party\spout\SpoutDirectX.cpp ^
+   third_party\spout\SpoutSenderNames.cpp third_party\spout\SpoutSharedMemory.cpp ^
+   third_party\spout\SpoutFrameCount.cpp third_party\spout\SpoutCopy.cpp ^
+   third_party\spout\SpoutUtils.cpp ^
    /Fe:WaveScope.exe ^
-   /link "%PMROOT%\lib\projectM-4.lib"
+   /link "%PMROOT%\lib\projectM-4.lib" d3d11.lib dxgi.lib
 if %errorlevel% neq 0 exit /b %errorlevel%
-del main.obj >nul 2>&1
+del *.obj >nul 2>&1
 
 rem Stage the projectM DLLs beside the exe so it runs in place.
 copy /y "%PMROOT%\bin\projectM-4.dll" . >nul
