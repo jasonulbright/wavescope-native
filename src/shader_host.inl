@@ -382,6 +382,18 @@ struct ShaderHost {
         SwapBuffers(dc);
     }
 
+    // Read the just-rendered (pre-present) backbuffer; bottom-up BGRA.
+    bool ReadBack(std::vector<uint8_t>& out, int& w, int& h) {
+        if (!ready) return false;
+        wglMakeCurrent(dc, glrc);
+        w = cw; h = ch;
+        if (w <= 0 || h <= 0) return false;
+        out.resize((size_t)w * h * 4);
+        glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        glReadPixels(0, 0, w, h, GL_BGRA_EXT, GL_UNSIGNED_BYTE, out.data());
+        return glGetError() == 0;
+    }
+
     void Destroy() {
         if (glrc) wglMakeCurrent(dc, glrc);
         if (overlayTex) { glDeleteTextures(1, &overlayTex); overlayTex = 0; }
