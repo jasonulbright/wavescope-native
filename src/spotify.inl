@@ -237,9 +237,17 @@ struct SpotifyClient {
         WritePrivateProfileStringW(L"spotify", L"refresh", hx.c_str(), IniPath().c_str());
     }
     void LoadToken() {
+        std::wstring path = IniPath();
         wchar_t buf[4096];
-        GetPrivateProfileStringW(L"spotify", L"refresh", L"", buf, 4096, IniPath().c_str());
+        GetPrivateProfileStringW(L"spotify", L"refresh", L"", buf, 4096, path.c_str());
         if (buf[0]) refreshToken = Dpapi(SpUnHex(SpNarrow(buf)), false);
+        // Client ID lives in the ini (configurable, not baked in). Seed the
+        // default on first run so it's there to edit; the ini is the source of
+        // truth thereafter.
+        wchar_t cid[128];
+        GetPrivateProfileStringW(L"spotify", L"clientId", L"", cid, 128, path.c_str());
+        if (cid[0]) clientId = SpNarrow(cid);
+        else WritePrivateProfileStringW(L"spotify", L"clientId", SpWiden(clientId).c_str(), path.c_str());
     }
 
     void Notify(const std::wstring& m) {

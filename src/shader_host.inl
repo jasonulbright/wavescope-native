@@ -220,6 +220,7 @@ struct ShaderHost {
         wc.lpfnWndProc = ChildProc;
         wc.hInstance = inst;
         wc.lpszClassName = L"WaveScopeShader";
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);   // else the frame's resize cursor shows through
         wc.style = CS_OWNDC;
         RegisterClassW(&wc);
 
