@@ -1676,6 +1676,10 @@ struct App {
     }
 };
 
+// Self-test harness (WaveScope.exe selftest): drives every engine on the demo
+// signal, dumps PNGs of what rendered, writes wavescope-selftest.log.
+#include "selftest.inl"
+
 // One App per display, heap-allocated so the pointers stashed in each window
 // (GWLP_USERDATA) stay valid regardless of vector growth.
 static std::vector<App*> g_views;
@@ -1873,12 +1877,46 @@ static BOOL CALLBACK CollectMonitor(HMONITOR mon, HDC, LPRECT, LPARAM lp) {
     return TRUE;
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
+// Parsed command line: whole-token flags only, so a path like
+// "C:\music\demo tracks\x.mp3" can never trip the demo/milkdrop flags, and
+// flags after file=... are not swallowed into the path (quotes work through
+// CommandLineToArgvW as usual).
+struct LaunchOpts {
+    bool demo = false, milkdrop = false, shader = false, wall = false,
+         kiosk = false, installStartup = false, removeStartup = false,
+         selftest = false;
+    std::wstring file;
+};
+
+static LaunchOpts ParseCmdLine() {
+    LaunchOpts o;
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return o;
+    for (int i = 1; i < argc; i++) {
+        std::wstring t = argv[i];
+        if      (t == L"demo")            o.demo = true;
+        else if (t == L"milkdrop")        o.milkdrop = true;
+        else if (t == L"shader")          o.shader = true;
+        else if (t == L"wall")            o.wall = true;
+        else if (t == L"kiosk")           o.kiosk = true;
+        else if (t == L"install-startup") o.installStartup = true;
+        else if (t == L"remove-startup")  o.removeStartup = true;
+        else if (t == L"selftest")        o.selftest = true;
+        else if (t.rfind(L"file=", 0) == 0) o.file = t.substr(5);
+    }
+    LocalFree(argv);
+    return o;
+}
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // UI-thread shell dialogs
 
+    LaunchOpts opts = ParseCmdLine();
+
     // Explicit launch-at-login toggles (user runs these deliberately).
-    if (pCmdLine && wcsstr(pCmdLine, L"install-startup")) { SetAutoStart(true);  return 0; }
-    if (pCmdLine && wcsstr(pCmdLine, L"remove-startup"))  { SetAutoStart(false); return 0; }
+    if (opts.installStartup) { SetAutoStart(true);  return 0; }
+    if (opts.removeStartup)  { SetAutoStart(false); return 0; }
 
     g_spotify.LoadToken(); // restore the DPAPI-encrypted Spotify refresh token
 
@@ -1892,8 +1930,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
     // "wall" spreads one borderless window across every display (video wall).
     // "kiosk" is a single borderless full-screen window on the primary display
     // with an idle cursor-hide. Otherwise a single 1440x900 window.
-    bool wall = pCmdLine && wcsstr(pCmdLine, L"wall");
-    bool kiosk = pCmdLine && wcsstr(pCmdLine, L"kiosk");
+    bool wall = opts.wall;
+    bool kiosk = opts.kiosk;
     g_borderless = wall || kiosk;
     std::vector<RECT> monitors;
     if (wall) {
@@ -1920,12 +1958,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
 
     // Command-line, applied to every window: "demo" synthetic signal,
     // "file=<path>" playback, "milkdrop"/"shader" boot into those engines.
-    const wchar_t* filePath = pCmdLine ? wcsstr(pCmdLine, L"file=") : nullptr;
     for (App* v : g_views) {
-        if (pCmdLine && wcsstr(pCmdLine, L"demo")) v->tap.SetSource(AudioTap::SRC_DEMO);
-        if (filePath) v->tap.SetFile(filePath + 5);
-        if (pCmdLine && wcsstr(pCmdLine, L"milkdrop")) v->ToggleProjectM();
-        if (pCmdLine && wcsstr(pCmdLine, L"shader")) v->ToggleShader();
+        if (opts.demo) v->tap.SetSource(AudioTap::SRC_DEMO);
+        if (!opts.file.empty()) v->tap.SetFile(opts.file.c_str());
+        if (opts.milkdrop) v->ToggleProjectM();
+        if (opts.shader) v->ToggleShader();
+    }
+
+    if (opts.selftest) {
+        int rc = RunSelfTest(g_views[0]);
+        TrayRemove();
+        for (App* v : g_views) { v->Shutdown(); delete v; }
+        g_views.clear();
+        return rc;
     }
 
     // Render loop: each window presents on vsync, so this paces itself.
