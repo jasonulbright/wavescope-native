@@ -741,8 +741,10 @@ struct App {
         // the D2D-rendered UI overlay (crisp, identical to the built-in view)
         // as a texture on top.
         if (pmActive && pmHost.ready) {
+            // _TRUNCATE everywhere a preset/file name flows into a HUD buffer:
+            // swprintf_s would abort the process if a long name didn't fit.
             wchar_t l1[300];
-            swprintf_s(l1, L"SRC %s\n%s %s\nRES %s\nFPS %d",
+            _snwprintf_s(l1, _TRUNCATE, L"SRC %s\n%s %s\nRES %s\nFPS %d",
                        tap.SourceName(), milkMode ? L"MILK" : L"PROJM", pmHost.PresetName(),
                        RES_OPTS[resIdx].name, fps);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
@@ -758,7 +760,7 @@ struct App {
         // GPU shader engine: a fullscreen fragment shader, same UI over it.
         if (shaderActive && shaderHost.ready) {
             wchar_t l1[300];
-            swprintf_s(l1, L"SRC %s\nGPU %s\nRES %s\nFPS %d",
+            _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nGPU %s\nRES %s\nFPS %d",
                        tap.SourceName(), shaderHost.ShaderName(shaderIdx), RES_OPTS[resIdx].name, fps);
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, nullptr);
             shaderHost.RenderEngine(shaderIdx, frame);
@@ -796,7 +798,7 @@ struct App {
         }
 
         wchar_t l1[300];
-        swprintf_s(l1, L"SRC %s\nMODE %s  (%02d/%d)\nRES %s\nFPS %d%s",
+        _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nMODE %s  (%02d/%d)\nRES %s\nFPS %d%s",
                    tap.SourceName(), mode.name, modeIdx + 1, MODE_COUNT,
                    RES_OPTS[resIdx].name, fps, calm ? L"   CALM" : L"");
         D2DPainter dp(rt, brush, hudFont, deckFont, tinyFont);
@@ -1782,6 +1784,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         a->OnClick((short)LOWORD(lp), (short)HIWORD(lp));
         return 0;
     case WM_KEYDOWN:
+        // While the palette-name field has focus, letters belong to the name
+        // (WM_CHAR), not to shortcuts — typing "Sunset" must not cycle the
+        // shuffle timer or launch the Spotify flow. ESC still closes.
+        if (a->palPanel && a->nameFocused) {
+            if (wp == VK_ESCAPE) { a->nameFocused = false; }
+            return 0;
+        }
         switch (wp) {
         case VK_SPACE:
         case VK_RIGHT:
@@ -1863,7 +1872,15 @@ static App* CreateView(HINSTANCE inst, const wchar_t* cls, RECT rc, bool borderl
     v->hwnd = CreateWindowExW(0, cls, L"WaveScope", style,
                               rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
                               nullptr, nullptr, inst, v);
-    if (!v->hwnd || !v->CreateGraphics()) { delete v; return nullptr; }
+    if (!v->hwnd) { delete v; return nullptr; }
+    if (!v->CreateGraphics()) {
+        // Unbind before destroying: late messages must not see a freed App,
+        // and the null binding keeps WM_DESTROY from quitting the app.
+        SetWindowLongPtrW(v->hwnd, GWLP_USERDATA, 0);
+        DestroyWindow(v->hwnd);
+        delete v;
+        return nullptr;
+    }
     v->tap.Start();
     v->LoadConfig();
     ShowWindow(v->hwnd, borderless ? SW_SHOW : nCmdShow);
@@ -1915,6 +1932,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // UI-thread shell dialogs
 
     LaunchOpts opts = ParseCmdLine();
+    srand((unsigned)GetTickCount64()); // shuffle must differ across launches
 
     // Explicit launch-at-login toggles (user runs these deliberately).
     if (opts.installStartup) { SetAutoStart(true);  return 0; }

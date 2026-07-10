@@ -89,7 +89,7 @@ static int RunSelfTest(App* v) {
     FILE* log = _wfopen((dir + L"wavescope-selftest.log").c_str(), L"w, ccs=UTF-8");
     auto out = [&](const wchar_t* fmt, auto... args) {
         wchar_t line[512];
-        swprintf_s(line, fmt, args...);
+        _snwprintf_s(line, _TRUNCATE, fmt, args...);
         if (log) { fwprintf(log, L"%s\n", line); fflush(log); }
         OutputDebugStringW(line); OutputDebugStringW(L"\n");
     };
