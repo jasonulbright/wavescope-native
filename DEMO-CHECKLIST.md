@@ -28,8 +28,10 @@ must print `tests: ALL PASS`), then `WaveScope.exe selftest` (must print
 - [ ] Press `E` again. → projectM (HUD `PROJM …`), real MilkDrop preset
       running. `SPACE` cycles presets with no white flash.
 - [ ] Mouse to the bottom edge. → Deck appears; click `milkdrop`, then the
-      picker dropdown → preset list in columns; pick one. Deck hides ~3 s
-      after the mouse leaves it.
+      picker dropdown → the CLASSIC library (551 originals — Geiss, Flexi,
+      Martin, Aderrasi…) in columns; pick one. Deck hides ~3 s after the
+      mouse leaves it. Click `projectM` → picker shows the 15 WaveScope
+      presets again.
 - [ ] Press `E` once more → back to WaveScope modes. The deck + HUD look
       identical over every engine.
 

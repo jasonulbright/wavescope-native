@@ -157,6 +157,17 @@ struct ProjectMHost {
 
         pm = projectm_create_with_opengl_load_proc(ProjectMGlLoad, nullptr);
         if (!pm) return false;
+        // Shared MilkDrop textures (textures\ beside the exe): the classic
+        // presets reference them by name; without the search path they render
+        // with plain fallbacks.
+        {
+            std::wstring wtex = PmExeDir() + L"textures";
+            char utf8[MAX_PATH * 3] = {};
+            WideCharToMultiByte(CP_UTF8, 0, wtex.c_str(), -1, utf8, sizeof(utf8) - 1,
+                                nullptr, nullptr);
+            const char* paths[1] = { utf8 };
+            projectm_set_texture_search_paths(pm, paths, 1);
+        }
         projectm_set_window_size(pm, (size_t)(rc.right > 0 ? rc.right : 1),
                                  (size_t)(rc.bottom > 0 ? rc.bottom : 1));
         projectm_set_mesh_size(pm, 48, 32);
