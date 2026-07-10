@@ -185,13 +185,11 @@ minimize hides to tray (and rendering fully stops while hidden).
 
 ## Dependencies
 
-See `DEPENDENCIES.md` for the full decision table. Short version: OS
-facilities everywhere they exist (WinHTTP, DPAPI, bcrypt, Media Foundation,
+OS facilities everywhere they exist (WinHTTP, DPAPI, bcrypt, Media Foundation,
 WASAPI, D2D/DirectWrite/WIC, WGL), two vendored dependencies (libprojectM
 4.x, LGPL-2.1, pinned, built from `C:\projects\projectm`; the Spout SDK's
 DX subset, BSD-2-Clause, pinned in-tree), and small hand-rolled code only
-where it is boring and testable (ini, flat JSON reads, base64url) — with
-the FFT and analysis pinned by unit tests.
+where it is boring and testable (ini, flat JSON reads, base64url).
 
 ## Licensing
 
@@ -203,12 +201,4 @@ the FFT and analysis pinned by unit tests.
   license at `third_party/spout/LICENSE.txt` (pin in `PIN.md` there).
 - **MilkDrop preset + texture packs** — community-distributed content,
   redistributed from the projectM-visualizer org (`presets-classic/` and
-  `textures/`, provenance and pins in `DEPENDENCIES.md`; the pack's own
-  README ships alongside).
-
-## Project docs
-
-`FINDINGS.md` records the adversarial review this codebase went through;
-`PARITY.md` tracks the feature matrix against the web app;
-`DEPENDENCIES.md` is the dependency decision table;
-`DEMO-CHECKLIST.md` is the 5-minute walkthrough script.
+  `textures/`; the pack's own README ships alongside).
