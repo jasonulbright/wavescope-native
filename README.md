@@ -187,7 +187,7 @@ the FFT and analysis pinned by unit tests.
 
 ## Licensing
 
-The app's own license is not yet chosen (private repo). Third-party:
+[MIT](LICENSE) © 2026 Signal Ridge Labs — same as the web app. Third-party:
 
 - **libprojectM 4.x** — LGPL-2.1, satisfied by dynamic linking
   (`projectM-4.dll` ships beside the exe, never statically linked).
