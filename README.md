@@ -6,9 +6,10 @@ dependencies. Everything links against OS DLLs only (user32, d2d1, dwrite,
 ole32); `/MT` means no MSVC redistributable, no .NET, no Java, no webview.
 The audit surface is this repo plus Windows.
 
-This is the native successor to the WaveScope web app (frozen at
-https://wavescope.higgsfield.app) and supersedes the Tauri experiment in
-`C:\projects\wavescope`. Web work is done; all augmentation happens here.
+This is the native successor to the WaveScope web app (live at
+https://wavescope.signalridgelabs.com, source at
+github.com/jasonulbright/wavescope). Web work is done; all augmentation
+happens here.
 
 ## Build
 
