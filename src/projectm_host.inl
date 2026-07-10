@@ -117,11 +117,13 @@ struct ProjectMHost {
         pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
         pfd.iPixelType = PFD_TYPE_RGBA; pfd.cColorBits = 32; pfd.cDepthBits = 24;
         int pf = ChoosePixelFormat(dc, &pfd);
-        if (!pf || !SetPixelFormat(dc, pf, &pfd)) return false;
+        // Any failure from here tears the partial state down: a user retrying
+        // the engine key must not leak a child window/DC/context per attempt.
+        if (!pf || !SetPixelFormat(dc, pf, &pfd)) { Destroy(); return false; }
 
         // Legacy context first, to fetch the modern-context creator.
         HGLRC legacy = wglCreateContext(dc);
-        if (!legacy) return false;
+        if (!legacy) { Destroy(); return false; }
         wglMakeCurrent(dc, legacy);
 
         auto createAttribs = (PFNWGLCREATECONTEXTATTRIBSARBPROC)wglGetProcAddress("wglCreateContextAttribsARB");
@@ -156,7 +158,7 @@ struct ProjectMHost {
         ch = rc.bottom > 0 ? rc.bottom : 1;
 
         pm = projectm_create_with_opengl_load_proc(ProjectMGlLoad, nullptr);
-        if (!pm) return false;
+        if (!pm) { Destroy(); return false; }
         // Shared MilkDrop textures (textures\ beside the exe): the classic
         // presets reference them by name; without the search path they render
         // with plain fallbacks.
@@ -175,9 +177,19 @@ struct ProjectMHost {
         projectm_set_preset_duration(pm, 30.0);
         projectm_set_soft_cut_duration(pm, 2.7);
         ScanPresets(PmExeDir() + L"presets");
-        LoadPreset(0, false);
+        LoadPreset(PreferredStart(), false);
         ready = true;
         return true;
+    }
+
+    // First preset to show for a folder: the web console opens on WaveScope
+    // Tunnel; alphabetical order would open on the 102-*/105-* test fixtures.
+    int PreferredStart() const {
+        for (size_t i = 0; i < presetPaths.size(); i++) {
+            const wchar_t* base = wcsrchr(presetPaths[i].c_str(), L'\\');
+            if (base && _wcsicmp(base + 1, L"wavescope-tunnel.milk") == 0) return (int)i;
+        }
+        return 0;
     }
 
     // Collect every .milk file in a folder into the playable list (sorted:
@@ -249,7 +261,7 @@ struct ProjectMHost {
     // Repoint at a folder of presets (the user's .milk archive).
     void SetPresetFolder(const wchar_t* folder) {
         ScanPresets(folder);
-        if (!presetPaths.empty()) LoadPreset(0, true);
+        if (!presetPaths.empty()) LoadPreset(PreferredStart(), true);
     }
 
     const wchar_t* PresetName() const { return curName.c_str(); }
