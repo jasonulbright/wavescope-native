@@ -182,7 +182,7 @@ struct ShaderHost {
         GLint ok = 0; p_GetShaderiv(s, GL_COMPILE_STATUS, &ok);
         if (!ok) {
             char log[1024] = {}; p_GetShaderInfoLog(s, sizeof(log) - 1, nullptr, log);
-            OutputDebugStringA("SpectraViz shader compile error:\n");
+            OutputDebugStringA("WaveScope shader compile error:\n");
             OutputDebugStringA(log);
             p_DeleteShader(s);
             return 0;
@@ -219,12 +219,12 @@ struct ShaderHost {
         WNDCLASSW wc = {};
         wc.lpfnWndProc = ChildProc;
         wc.hInstance = inst;
-        wc.lpszClassName = L"SpectraVizShader";
+        wc.lpszClassName = L"WaveScopeShader";
         wc.style = CS_OWNDC;
         RegisterClassW(&wc);
 
         RECT rc; GetClientRect(parent, &rc);
-        child = CreateWindowExW(0, L"SpectraVizShader", L"", WS_CHILD,
+        child = CreateWindowExW(0, L"WaveScopeShader", L"", WS_CHILD,
                                 0, 0, rc.right, rc.bottom, parent, nullptr, inst, nullptr);
         if (!child) return false;
         dc = GetDC(child);

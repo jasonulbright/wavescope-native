@@ -3,7 +3,7 @@
 // the right flow for a serverless native app): the browser authorizes once,
 // the redirect to http://127.0.0.1:8888/callback is caught on a raw socket,
 // and tokens are fetched over WinHTTP. The refresh token is DPAPI-encrypted
-// (tied to the Windows user) in spectraviz.ini, so re-auth is rare and the
+// (tied to the Windows user) in wavescope.ini, so re-auth is rare and the
 // stored token isn't portable or readable by other accounts.
 //
 // Playback control (the Player endpoints) is Spotify Premium-only; loopback
@@ -102,7 +102,7 @@ struct SpResp { DWORD status = 0; std::string body; };
 static SpResp SpHttps(const wchar_t* host, const wchar_t* verb, const wchar_t* path,
                       const std::string& body, const std::string& ctype, const std::string& bearer) {
     SpResp r;
-    HINTERNET s = WinHttpOpen(L"SpectraViz/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET s = WinHttpOpen(L"WaveScope/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!s) return r;
     HINTERNET c = WinHttpConnect(s, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
@@ -196,9 +196,9 @@ static bool SpWaitForCode(std::string& code, const std::string& expectState) {
                     const char* resp = ok
                         ? "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
                           "<html><body style='font-family:Segoe UI,sans-serif;background:#0b0d0c;"
-                          "color:#e8eae8;text-align:center;padding-top:12%'><h2>SpectraViz connected</h2>"
+                          "color:#e8eae8;text-align:center;padding-top:12%'><h2>WaveScope connected</h2>"
                           "<p>You can close this tab and return to the visualizer.</p></body></html>"
-                        : "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nSpectraViz auth failed.";
+                        : "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nWaveScope auth failed.";
                     send(cS, resp, (int)strlen(resp), 0);
                     closesocket(cS);
                 }
@@ -219,11 +219,11 @@ struct SpotifyClient {
     std::string accessToken, refreshToken;
     std::atomic<bool> busy{ false };
 
-    std::wstring IniPath() const { return PmExeDir() + L"spectraviz.ini"; }
+    std::wstring IniPath() const { return PmExeDir() + L"wavescope.ini"; }
 
     std::string Dpapi(const std::string& in, bool enc) {
         DATA_BLOB i = { (DWORD)in.size(), (BYTE*)in.data() }, o = {};
-        BOOL ok = enc ? CryptProtectData(&i, L"SpectraViz", nullptr, nullptr, nullptr, 0, &o)
+        BOOL ok = enc ? CryptProtectData(&i, L"WaveScope", nullptr, nullptr, nullptr, 0, &o)
                       : CryptUnprotectData(&i, nullptr, nullptr, nullptr, nullptr, 0, &o);
         if (!ok) return "";
         std::string r((char*)o.pbData, o.cbData);
@@ -243,7 +243,7 @@ struct SpotifyClient {
     }
 
     void Notify(const std::wstring& m) {
-        MessageBoxW(nullptr, m.c_str(), L"SpectraViz \x2014 Spotify",
+        MessageBoxW(nullptr, m.c_str(), L"WaveScope \x2014 Spotify",
                     MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
     }
 

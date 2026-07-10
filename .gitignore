@@ -1,6 +1,6 @@
-SpectraViz.exe
+WaveScope.exe
 *.obj
 *.pdb
 *.dll
 test.wav
-spectraviz.ini
+wavescope.ini

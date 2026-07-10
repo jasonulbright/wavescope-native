@@ -1,4 +1,4 @@
-// SpectraViz native: phase-1 shell.
+// WaveScope native: phase-1 shell.
 //
 // A classic, dependency-free Windows app: Win32 window, Direct2D rendering,
 // WASAPI loopback capture (hears whatever the machine plays), own FFT.
@@ -717,7 +717,7 @@ struct App {
         // as a texture on top.
         if (pmActive && pmHost.ready) {
             wchar_t l1[300], l2[280];
-            swprintf_s(l1, L"SPECTRAVIZ  projectM  %s  (%d presets)  SRC %s  SHUF %s  FPS %d",
+            swprintf_s(l1, L"WAVESCOPE  projectM  %s  (%d presets)  SRC %s  SHUF %s  FPS %d",
                        pmHost.PresetName(), pmHost.PresetCount(), tap.SourceName(), SHUF[shuffleIdx], fps);
             swprintf_s(l2, L"SPACE/\x2190\x2192 preset  L folder  1-4 src  S shuffle  M exit  G gpu  B spotify  F full  H hud  F1 help  ESC");
             bool dirty = BuildOverlay(crc.right, crc.bottom, l1, l2);
@@ -733,7 +733,7 @@ struct App {
         // GPU shader engine: a fullscreen fragment shader, same UI over it.
         if (shaderActive && shaderHost.ready) {
             wchar_t l1[300], l2[280];
-            swprintf_s(l1, L"SPECTRAVIZ  GPU shader  %s  (%d/%d)  SRC %s  SHUF %s  FPS %d",
+            swprintf_s(l1, L"WAVESCOPE  GPU shader  %s  (%d/%d)  SRC %s  SHUF %s  FPS %d",
                        shaderHost.ShaderName(shaderIdx), (shaderIdx % shaderHost.ShaderCount()) + 1,
                        shaderHost.ShaderCount(), tap.SourceName(), SHUF[shuffleIdx], fps);
             swprintf_s(l2, L"SPACE/\x2190\x2192 shader  1-4 src  S shuffle  G exit  M milk  B spotify  F full  H hud  F1 help  ESC");
@@ -773,7 +773,7 @@ struct App {
         }
 
         wchar_t l1[300], l2[280];
-        swprintf_s(l1, L"SPECTRAVIZ  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d",
+        swprintf_s(l1, L"WAVESCOPE  MODE %02d/%d %s  TRACE %s  SRC %s  RES %s (%ux%u)  SHUF %s%s  FPS %d",
                    modeIdx + 1, MODE_COUNT, mode.name, PaletteName(), tap.SourceName(),
                    RES_OPTS[resIdx].name, offW, offH, SHUF[shuffleIdx], calm ? L"  CALM" : L"", fps);
         swprintf_s(l2, L"SPACE/\x2190\x2192 cycle  P palette  N palettes  1-4 src  R res  S shuffle  C calm  M milk  G gpu  B spotify  F full  H hud  F1 help  ESC");
@@ -915,7 +915,7 @@ struct App {
     // Full keymap overlay (F1 / ?), a centered card over any engine.
     void DrawHelpP(UIPainter& p) {
         static const wchar_t* HELP =
-            L"SPECTRAVIZ  \x2014  KEYS\n"
+            L"WAVESCOPE  \x2014  KEYS\n"
             L"\n"
             L"SPACE / \x2192      next mode (or preset / shader)\n"
             L"\x2190              previous\n"
@@ -933,7 +933,7 @@ struct App {
             L"F              fullscreen        H   HUD on/off\n"
             L"F1 / ?         this help         ESC quit\n"
             L"\n"
-            L"Launch: SpectraViz.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
+            L"Launch: WaveScope.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
             L"        [install-startup | remove-startup]   \x2014   tray icon: right-click";
         float w = 620, h = 448;
         float x = (p.W() - w) * 0.5f, y = (p.H() - h) * 0.5f;
@@ -998,18 +998,18 @@ struct App {
         if (!pmActive) {
             if (shaderActive) { shaderActive = false; shaderHost.Show(false); }
             if (!pmHost.ready && !pmHost.Init(inst, hwnd)) {
-                SetWindowTextW(hwnd, L"SpectraViz  (projectM failed to start)");
+                SetWindowTextW(hwnd, L"WaveScope  (projectM failed to start)");
                 return;
             }
             RECT rc; GetClientRect(hwnd, &rc);
             pmHost.Resize(rc.right, rc.bottom);
             pmHost.Show(true);
             pmActive = true;
-            SetWindowTextW(hwnd, L"SpectraViz  projectM (M to exit, SPACE next preset)");
+            SetWindowTextW(hwnd, L"WaveScope  projectM (M to exit, SPACE next preset)");
         } else {
             pmActive = false;
             pmHost.Show(false);
-            SetWindowTextW(hwnd, L"SpectraViz");
+            SetWindowTextW(hwnd, L"WaveScope");
         }
     }
 
@@ -1018,18 +1018,18 @@ struct App {
         if (!shaderActive) {
             if (pmActive) { pmActive = false; pmHost.Show(false); }
             if (!shaderHost.ready && !shaderHost.Init(inst, hwnd)) {
-                SetWindowTextW(hwnd, L"SpectraViz  (GPU shaders failed to start)");
+                SetWindowTextW(hwnd, L"WaveScope  (GPU shaders failed to start)");
                 return;
             }
             RECT rc; GetClientRect(hwnd, &rc);
             shaderHost.Resize(rc.right, rc.bottom);
             shaderHost.Show(true);
             shaderActive = true;
-            SetWindowTextW(hwnd, L"SpectraViz  GPU shader (G to exit, SPACE next shader)");
+            SetWindowTextW(hwnd, L"WaveScope  GPU shader (G to exit, SPACE next shader)");
         } else {
             shaderActive = false;
             shaderHost.Show(false);
-            SetWindowTextW(hwnd, L"SpectraViz");
+            SetWindowTextW(hwnd, L"WaveScope");
         }
     }
 
@@ -1271,9 +1271,9 @@ struct App {
         return true; // swallow clicks while the panel is up
     }
 
-    // ----- settings persistence (spectraviz.ini beside the exe) -----
+    // ----- settings persistence (wavescope.ini beside the exe) -----
 
-    std::wstring ConfigPath() const { return PmExeDir() + L"spectraviz.ini"; }
+    std::wstring ConfigPath() const { return PmExeDir() + L"wavescope.ini"; }
 
     void SaveConfig() {
         std::wstring path = ConfigPath();
@@ -1394,7 +1394,7 @@ static void TrayAdd(HWND hwnd) {
     g_tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_tray.uCallbackMessage = WM_TRAY;
     g_tray.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-    wcscpy_s(g_tray.szTip, L"SpectraViz");
+    wcscpy_s(g_tray.szTip, L"WaveScope");
     if (Shell_NotifyIconW(NIM_ADD, &g_tray)) g_trayAdded = true;
 }
 
@@ -1411,13 +1411,13 @@ static void SetAutoStart(bool on) {
     if (on) {
         wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
         std::wstring cmd = std::wstring(L"\"") + exe + L"\"";
-        RegSetValueExW(k, L"SpectraViz", 0, REG_SZ, (const BYTE*)cmd.c_str(),
+        RegSetValueExW(k, L"WaveScope", 0, REG_SZ, (const BYTE*)cmd.c_str(),
                        (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
-        MessageBoxW(nullptr, L"SpectraViz will now launch at login.", L"SpectraViz",
+        MessageBoxW(nullptr, L"WaveScope will now launch at login.", L"WaveScope",
                     MB_OK | MB_ICONINFORMATION);
     } else {
-        RegDeleteValueW(k, L"SpectraViz");
-        MessageBoxW(nullptr, L"SpectraViz login launch removed.", L"SpectraViz",
+        RegDeleteValueW(k, L"WaveScope");
+        MessageBoxW(nullptr, L"WaveScope login launch removed.", L"WaveScope",
                     MB_OK | MB_ICONINFORMATION);
     }
     RegCloseKey(k);
@@ -1537,7 +1537,7 @@ static App* CreateView(HINSTANCE inst, const wchar_t* cls, RECT rc, bool borderl
     QueryPerformanceFrequency(&v->qpcFreq);
     QueryPerformanceCounter(&v->qpcStart);
     DWORD style = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
-    v->hwnd = CreateWindowExW(0, cls, L"SpectraViz", style,
+    v->hwnd = CreateWindowExW(0, cls, L"WaveScope", style,
                               rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
                               nullptr, nullptr, inst, v);
     if (!v->hwnd || !v->CreateGraphics()) { delete v; return nullptr; }
@@ -1569,7 +1569,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = L"SpectraVizWindow";
+    wc.lpszClassName = L"WaveScopeWindow";
     RegisterClassW(&wc);
 
     // "wall" spreads one borderless window across every display (video wall).

@@ -1,4 +1,4 @@
-# SpectraViz (native)
+# WaveScope (native)
 
 A music visualizer built like an instrument, and built like a classic
 Windows app: one C++ source tree, one statically linked .exe, zero runtime
@@ -8,7 +8,7 @@ The audit surface is this repo plus Windows.
 
 This is the native successor to the WaveScope web app (frozen at
 https://wavescope.higgsfield.app) and supersedes the Tauri experiment in
-`C:\projects\spectraviz`. Web work is done; all augmentation happens here.
+`C:\projects\wavescope`. Web work is done; all augmentation happens here.
 
 ## Build
 
@@ -17,7 +17,7 @@ build.bat
 ```
 
 Requires Visual Studio 2026 (any edition) for the compiler. Output:
-`SpectraViz.exe`, ~200 KB, runs on stock Windows 10/11 forever.
+`WaveScope.exe`, ~200 KB, runs on stock Windows 10/11 forever.
 
 ## What works today
 
@@ -37,7 +37,7 @@ Requires Visual Studio 2026 (any edition) for the compiler. Output:
   MSVC runs in a child window with its own WGL/OpenGL 3.3 context layered
   over the Direct2D surface, fed PCM from the same loopback tap, rendering
   raw `.milk` presets. `SPACE`/arrows cycle presets while it is active.
-  Bundled starters in `presets/`. Launch with `SpectraViz.exe milkdrop` to
+  Bundled starters in `presets/`. Launch with `WaveScope.exe milkdrop` to
   boot straight into it.
 - **GPU shader engine** (`G` key, `src/shader_host.inl`): three per-pixel
   fragment shaders (plasma field, warp tunnel, fractal fold) ported 1:1 from
@@ -56,7 +56,7 @@ Keys: `SPACE`/`RIGHT` next (mode or preset), `LEFT` prev, `P` palette,
 `4` open audio file, `S` shuffle timer, `C` calm mode, `R` resolution target,
 `L` MilkDrop preset folder, `M` MilkDrop engine, `G` GPU shader engine,
 `B` Spotify (authorize + play), `F` fullscreen, `H` HUD, `ESC` quit. Settings
-and custom palettes persist to `spectraviz.ini`.
+and custom palettes persist to `wavescope.ini`.
 
 Launch flags: `demo` (synthetic signal), `file=<path>` (play a file),
 `milkdrop` / `shader` (boot into that engine), `wall` (borderless video wall
@@ -84,7 +84,7 @@ feature:
 | System-audio capture | done (WASAPI loopback) |
 | Fullscreen | done |
 | HUD / keyboard control | done (persists over both engines; deck UI pending) |
-| Demo signal source | done (key 3, or `SpectraViz demo`) |
+| Demo signal source | done (key 3, or `WaveScope demo`) |
 | Microphone source | done (key 2) |
 | Audio-file source | done (key 4, Media Foundation decode + play) |
 | Spotify one-button (PKCE) | done (B / SPOT: authorize once, then play) |
@@ -92,7 +92,7 @@ feature:
 | Shuffle timer | done (key S for modes; palette-shuffle + include list in the N panel) |
 | Calm mode (photosensitivity) | done (key C) |
 | Custom palette creation | done (N panel: 3-stop editor + color picker + naming) |
-| Settings / preset persistence | done (spectraviz.ini beside the exe) |
+| Settings / preset persistence | done (wavescope.ini beside the exe) |
 | projectM preset library | done (scans a folder of .milk; L picks your archive) |
 | GPU shader modes (plasma/tunnel/fractal) | done (G: real GLSL fragment shaders on the GL context) |
 | Multi-monitor (per-display windows) | done (`wall` flag: independent visual per screen) |
@@ -105,7 +105,7 @@ feature:
 
 1. ~~**Audio input sources.**~~ DONE. Loopback (1), mic (2), demo (3), and
    audio file (4, Media Foundation decode + WASAPI render + analyze, loops;
-   also `SpectraViz.exe file=<path>`). All four switchable at runtime.
+   also `WaveScope.exe file=<path>`). All four switchable at runtime.
 2. ~~**Playback controls.**~~ DONE. Resolution targets (R: AUTO/1080/1440/
    4K/8K, rendered into an offscreen bitmap then scaled to the window),
    shuffle timer (S: off/15s/30s/1m/5m, hops modes or projectM presets), calm
@@ -116,7 +116,7 @@ feature:
    (see step 7) to build a three-stop palette from the standard color picker;
    it joins the `P` rotation. Settings (mode, palette, resolution, shuffle,
    calm, palette-shuffle + include list) and custom palettes persist to
-   `spectraviz.ini` beside the exe, restored on launch. *Source is
+   `wavescope.ini` beside the exe, restored on launch. *Source is
    intentionally not restored (starts on loopback).*
 4. ~~**projectM preset library.**~~ DONE. Scans a folder of raw `.milk`
    files and cycles all of them (SPACE/arrows/shuffle); `L` picks your own
@@ -128,9 +128,9 @@ feature:
    drawn as a fullscreen triangle over its own WGL/OpenGL 3.3 child window —
    the same host pattern as projectM, so the bitmap-font HUD overlays it too.
    True per-pixel at window resolution, audio-uniform driven. `SPACE`/arrows
-   cycle shaders, shuffle rotates them, `SpectraViz.exe shader` boots into it.
+   cycle shaders, shuffle rotates them, `WaveScope.exe shader` boots into it.
    Pulls in **no** new dependency (pure GPU + OS, unlike projectM's DLL).
-6. ~~**Multi-monitor.**~~ DONE. `SpectraViz.exe wall` spans one borderless
+6. ~~**Multi-monitor.**~~ DONE. `WaveScope.exe wall` spans one borderless
    window across every display (`EnumDisplayMonitors`), each an independent
    `App` with its own engine/mode/palette/resolution and its own loopback tap
    (no cross-window streaming — one process, shared machine audio). It's a
@@ -168,7 +168,7 @@ feature:
    validated), tokens are fetched over WinHTTP, and the Player API starts
    playback on your device — which the loopback tap already visualizes. The
    refresh token is **DPAPI-encrypted** (bound to the Windows user) in
-   `spectraviz.ini`, so re-auth is rare. The whole flow runs on a worker
+   `wavescope.ini`, so re-auth is rare. The whole flow runs on a worker
    thread; the render loop never stalls. *Playback control needs Spotify
    Premium (the Player endpoints are Premium-only); loopback capture of
    whatever is already playing needs none of this.*

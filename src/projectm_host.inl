@@ -91,12 +91,12 @@ struct ProjectMHost {
         WNDCLASSW wc = {};
         wc.lpfnWndProc = ChildProc;
         wc.hInstance = inst;
-        wc.lpszClassName = L"SpectraVizGL";
+        wc.lpszClassName = L"WaveScopeGL";
         wc.style = CS_OWNDC;
         RegisterClassW(&wc);
 
         RECT rc; GetClientRect(parent, &rc);
-        child = CreateWindowExW(0, L"SpectraVizGL", L"", WS_CHILD,
+        child = CreateWindowExW(0, L"WaveScopeGL", L"", WS_CHILD,
                                 0, 0, rc.right, rc.bottom, parent, nullptr, inst, nullptr);
         if (!child) return false;
         dc = GetDC(child);
