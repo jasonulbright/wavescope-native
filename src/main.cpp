@@ -634,7 +634,9 @@ struct App {
     // the GL side. Returns true if the texture must be re-uploaded.
     bool BuildOverlay(int clientW, int clientH, const wchar_t* l1, const wchar_t* l2) {
         if (!EnsureOverlayRT(clientW, clientH)) return false;
-        std::wstring sig = std::to_wstring(olW) + L"|" + std::to_wstring(olH) + L"|" +
+        float sc = UiScale();
+        std::wstring sig = std::to_wstring((int)(sc * 100)) + L"|" +
+            std::to_wstring(olW) + L"|" + std::to_wstring(olH) + L"|" +
             std::to_wstring(deckVisible) + L"|" + std::to_wstring(deckHover) + L"|" +
             std::to_wstring(help) + L"|" + std::to_wstring(deckMenu) + L"|" +
             std::to_wstring((int)(HudFade() * 12)) + L"|" +   // fade steps → re-render as HUD fades
@@ -653,8 +655,10 @@ struct App {
 
         olRT->BeginDraw();
         olRT->Clear(D2D1::ColorF(0, 0.0f));   // transparent
-        D2DPainter p(olRT, olBrush, hudFont, deckFont, tinyFont);
+        olRT->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc));
+        D2DPainter p(olRT, olBrush, hudFont, deckFont, tinyFont, sc);
         DrawUI(p, l1, l2);
+        olRT->SetTransform(D2D1::Matrix3x2F::Identity());
         olRT->EndDraw();
 
         WICRect rc = { 0, 0, (INT)olW, (INT)olH };
@@ -704,13 +708,24 @@ struct App {
         RECT rc;
         GetClientRect(hwnd, &rc);
         D2D1_SIZE_U size = D2D1::SizeU(rc.right - rc.left, rc.bottom - rc.top);
+        // Pin the target at 96 DPI: the process is per-monitor-v2 aware and
+        // does all layout in raw pixels; 1 DIP must always equal 1 pixel.
+        D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(), 96.0f, 96.0f);
         HRESULT hr = d2d->CreateHwndRenderTarget(
-            D2D1::RenderTargetProperties(),
+            props,
             D2D1::HwndRenderTargetProperties(hwnd, size),
             &rt);
         if (FAILED(hr)) return false;
         rt->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::White), &brush);
         return true;
+    }
+
+    // Monitor scale factor: the UI is laid out in 96-DPI logical units and
+    // drawn under a scale transform (text scales as vectors, stays crisp).
+    float UiScale() const {
+        UINT dpi = GetDpiForWindow(hwnd);
+        return dpi ? (float)dpi / 96.0f : 1.0f;
     }
 
     void Render() {
@@ -801,8 +816,11 @@ struct App {
         _snwprintf_s(l1, _TRUNCATE, L"SRC %s\nMODE %s  (%02d/%d)\nRES %s\nFPS %d%s",
                    tap.SourceName(), mode.name, modeIdx + 1, MODE_COUNT,
                    RES_OPTS[resIdx].name, fps, calm ? L"   CALM" : L"");
-        D2DPainter dp(rt, brush, hudFont, deckFont, tinyFont);
+        float sc = UiScale();
+        rt->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc));
+        D2DPainter dp(rt, brush, hudFont, deckFont, tinyFont, sc);
         DrawUI(dp, l1, nullptr);
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
 
         HRESULT hr = rt->EndDraw();
         if (hr == (HRESULT)D2DERR_RECREATE_TARGET) CreateTarget();
@@ -951,11 +969,13 @@ struct App {
         return D2D1::RectF(x0 - 8, yTop - 8, x1 + 8, H - bottom + 8);
     }
 
+    // Hit tests take LOGICAL coords (WndProc divides mouse pixels by UiScale).
     int DeckHitTest(int mx, int my) {
         if (!rt) return -1;
+        float sc = UiScale();
         D2D1_SIZE_F size = rt->GetSize();
         D2D1_RECT_F b[DK_N];
-        DeckLayout(size.width, size.height, b);
+        DeckLayout(size.width / sc, size.height / sc, b);
         for (int i = 0; i < DK_N; i++)
             if (mx >= b[i].left && mx <= b[i].right && my >= b[i].top && my <= b[i].bottom)
                 return i;
@@ -1141,9 +1161,10 @@ struct App {
     }
     bool MenuClick(int mx, int my) {
         if (deckMenu < 0) return false;
+        float sc = UiScale();
         D2D1_SIZE_F sz = rt->GetSize();
         D2D1_RECT_F bg; std::vector<D2D1_RECT_F> rows;
-        MenuGeom(deckMenu, sz.width, sz.height, bg, rows);
+        MenuGeom(deckMenu, sz.width / sc, sz.height / sc, bg, rows);
         for (int i = 0; i < (int)rows.size(); i++)
             if (In(rows[i], mx, my)) {
                 if (MenuDisabled(deckMenu, i)) return true;   // disabled: swallow, don't select
@@ -1155,16 +1176,21 @@ struct App {
     }
 
     // Mouse near the bottom edge reveals the deck; hovering keeps it alive.
-    void OnMouseMove(int mx, int my) {
+    // px/py arrive in physical pixels; the UI lives in logical units.
+    void OnMouseMove(int pxx, int pxy) {
+        float sc = UiScale();
+        int mx = (int)(pxx / sc), my = (int)(pxy / sc);
         hudActivity = Now();   // any movement wakes the HUD (then it fades on idle)
         if (palPanel) return;  // panel is modal
         RECT rc; GetClientRect(hwnd, &rc);
         int hit = DeckHitTest(mx, my);
-        if (my > rc.bottom - 175 || hit >= 0 || deckMenu >= 0) { deckVisible = true; deckActivity = Now(); }
+        if (my > (int)(rc.bottom / sc) - 175 || hit >= 0 || deckMenu >= 0) { deckVisible = true; deckActivity = Now(); }
         deckHover = deckVisible ? hit : -1;
     }
 
-    void OnClick(int mx, int my) {
+    void OnClick(int pxx, int pxy) {
+        float sc = UiScale();
+        int mx = (int)(pxx / sc), my = (int)(pxy / sc);
         if (PanelClick(mx, my)) return;
         if (MenuClick(mx, my)) { deckActivity = Now(); return; }
         if (!deckVisible) return;
@@ -1566,8 +1592,9 @@ struct App {
     // Handle a click while the panel is open. Returns true if consumed.
     bool PanelClick(int mx, int my) {
         if (!palPanel) return false;
+        float sc = UiScale();
         D2D1_SIZE_F sz = rt->GetSize();
-        PalRects r; PalLayout(sz.width, sz.height, r);
+        PalRects r; PalLayout(sz.width / sc, sz.height / sc, r);
         if (In(r.close, mx, my)) { palPanel = false; return true; }
         if (In(r.master, mx, my)) { shufflePalettes = !shufflePalettes; SaveConfig(); return true; }
         for (int i = 0; i < r.rows; i++) if (In(r.row[i], mx, my)) {
@@ -1771,6 +1798,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (a->pmHost.ready) a->pmHost.Resize(LOWORD(lp), HIWORD(lp));
         if (a->shaderHost.ready) a->shaderHost.Resize(LOWORD(lp), HIWORD(lp));
         return 0;
+    case WM_DPICHANGED: {
+        // Per-monitor-v2: adopt the suggested rect; WM_SIZE resizes the
+        // targets and UiScale() picks up the new factor on the next frame.
+        RECT* r = (RECT*)lp;
+        SetWindowPos(hwnd, nullptr, r->left, r->top,
+                     r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
     case WM_SETCURSOR:
         // Force the arrow over the client area. The bottom sizing border flips
         // the cursor to a resize double-arrow when you graze it to reveal the
@@ -1929,6 +1965,9 @@ static LaunchOpts ParseCmdLine() {
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
+    // Per-monitor-v2 DPI awareness (Win10 1703+, our floor): real pixels on
+    // every monitor, no bitmap stretching, WM_DPICHANGED on monitor moves.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // UI-thread shell dialogs
 
     LaunchOpts opts = ParseCmdLine();
