@@ -320,6 +320,33 @@ static int RunSelfTest(App* v) {
             v->pmHost.PresetName(), v->pmHost.PresetCount(), w, h, lit,
             pass ? L"PASS" : L"FAIL");
         if (!pass) rc = 1;
+
+        // MILK flavor: the bundled classic MilkDrop library. Assert the pack
+        // is present and sweep a spread of originals through the real parser
+        // (ns-eel heavy) as a crash/hang smoke test.
+        v->EnterProjectM(true);
+        int classics = v->pmHost.PresetCount();
+        if (classics < 500) {
+            out(L"milk: classic library missing or short (%d presets) -> FAIL", classics);
+            rc = 1;
+        } else {
+            for (int k = 0; k < 12; k++) {
+                v->pmHost.LoadPreset(k * (classics / 12), false);
+                for (int i = 0; i < 3; i++) { pump(); v->Render(); }
+            }
+            std::vector<uint8_t> cpx; int cw2 = 0, ch2 = 0;
+            float pcm2[4800];
+            int n2 = g_tap.ReadNew(v->pmCursor, pcm2, 4800);
+            v->pmHost.RenderEngine(pcm2, n2);
+            bool ccap = v->pmHost.ReadBack(cpx, cw2, ch2);
+            float clit = ccap ? StLitPct(cpx.data(), cpx.size()) : 0.0f;
+            if (ccap) StWritePng((dir + L"selftest-milk-classic.png").c_str(),
+                                 cpx.data(), cw2, ch2, true);
+            out(L"milk: %d classics swept, preset=%s lit=%.1f%% -> %s",
+                classics, v->pmHost.PresetName(), clit, ccap ? L"PASS" : L"FAIL");
+            if (!ccap) rc = 1;
+        }
+        v->EnterProjectM(false);   // back to the bundled WaveScope presets
         v->ToggleProjectM();
     }
 

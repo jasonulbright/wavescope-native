@@ -27,6 +27,7 @@ walkthrough (`DEMO-CHECKLIST.md`).
 | GPU FFT texture (1024×r8) + waveform texture (2048×r8), `spec()/specLog()/wav()` | done | selftest captures both texture-fed shaders |
 | projectM: real .milk via native libprojectM | done | |
 | Bundled presets (same files as web) | done | all 15 from `presets-milk/` |
+| Classic MilkDrop library (web: ~62 Butterchurn conversions) | done, exceeded | MILK ships the 551-preset ORIGINAL MilkDrop distribution pack + shared textures (presets-classic\ + textures\, pinned — see DEPENDENCIES.md); selftest sweeps 12 through the parser |
 | User preset folder (library) + hot reload | done | exceeds web |
 | Preset blend on switch | done* | deliberate hard cut: projectM's soft-cut blends before the incoming preset's first frame and flashes white; the clean cut is the better feel. Documented deviation. |
 | Butterchurn as separate engine | N/A-desktop | native projectM covers MilkDrop |

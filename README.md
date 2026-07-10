@@ -9,7 +9,9 @@ This is the native successor to the WaveScope web app (live at
 https://wavescope.signalridgelabs.com, source at
 github.com/jasonulbright/wavescope). It matches the web app feature for
 feature — same analysis math, same 34 modes, same 17 GPU shaders, same
-palettes — and adds the things only a desktop app can do: silent WASAPI
+palettes, the same 15 `.milk` presets plus the full 551-preset classic
+MilkDrop library in original form — and adds the things only a desktop app
+can do: silent WASAPI
 loopback, MP4 clip recording, companion displays from one engine,
 always-on-top, tray, launch at login.
 
@@ -47,7 +49,7 @@ on any failure. Run it after every change; CI-in-a-flag.
 |---|---|
 | **WaveScope** | 34 built-in modes in five families (spectrum 9, waveform 6, particles 6, geometry 6, field 7), Direct2D, faithful ports of the web canvas math, phosphor-trail retained rendering. |
 | **GPU** | All 17 web WGSL shader modes ported 1:1 to GLSL 330 (Plasma field … Scope lines), compiled at runtime on a WGL context. Audio uniforms plus per-frame FFT (1024×R8) and waveform (2048×R8) textures with `spec()/specLog()/wav()`. |
-| **projectM / MILK** | Real MilkDrop via native libprojectM: PROJM plays the 15 bundled presets (same files as the web app), MILK plays your own `.milk` folder (`L` to pick, hot-reloads on change). |
+| **projectM / MILK** | Real MilkDrop via native libprojectM. PROJM plays the 15 bundled WaveScope presets (same files as the web app). MILK plays the **original classic library — 551 presets from the official MilkDrop distribution** (`presets-classic\`, with the shared texture pack in `textures\`) — or your own `.milk` folder (`L` to pick, hot-reloads on change). These are the true originals of the ~60 converted classics the web's Butterchurn engine ships, running on the real ns-eel VM. |
 
 ## Sources
 

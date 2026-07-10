@@ -1256,14 +1256,25 @@ struct App {
         else CycleMode(dir);
     }
 
-    // Enter the projectM engine as PROJM (bundled presets) or MILK (the user's
-    // classic .milk library, if they've pointed one via the folder picker).
+    // MILK's library folder: the user's picked archive, else the bundled
+    // classic MilkDrop pack (presets-classic\, 551 originals) when present.
+    std::wstring MilkLibrary() const {
+        if (!libraryFolder.empty()) return libraryFolder;
+        std::wstring def = PmExeDir() + L"presets-classic";
+        return GetFileAttributesW(def.c_str()) != INVALID_FILE_ATTRIBUTES ? def : L"";
+    }
+
+    // Enter the projectM engine as PROJM (the bundled WaveScope presets) or
+    // MILK (the classic library / the user's own folder). Switching flavors
+    // re-points the scan both ways.
     void EnterProjectM(bool library) {
         if (shaderActive) ToggleShader();
         if (!pmActive) ToggleProjectM();
+        if (!pmActive || !pmHost.ready) return;
         milkMode = library;
-        if (pmActive && pmHost.ready && library && !libraryFolder.empty())
-            pmHost.SetPresetFolder(libraryFolder.c_str());
+        std::wstring want = library ? MilkLibrary() : PmExeDir() + L"presets";
+        if (!want.empty() && pmHost.scanDir != want)
+            pmHost.SetPresetFolder(want.c_str());
     }
 
     // ---- multi-monitor: the DISPLAYS dropdown moves the window per screen ----
@@ -1588,7 +1599,7 @@ struct App {
         if (wantPm && pmHost.Init(inst, hwnd)) {
             if (isCompanion) pmHost.SetVsync(false);
             pmHost.Resize(rc.right, rc.bottom);
-            if (milkMode && !libraryFolder.empty()) pmHost.SetPresetFolder(libraryFolder.c_str());
+            if (milkMode && !MilkLibrary().empty()) pmHost.SetPresetFolder(MilkLibrary().c_str());
             pmHost.Show(true);
         } else if (wantPm) {
             pmActive = false;
