@@ -137,22 +137,22 @@ just that companion. `WaveScope.exe wall` boots straight into that state;
 
 ## Spotify
 
-`B` runs OAuth2 Authorization Code + PKCE (no client secret; the client ID
-lives in `wavescope.ini`, yours to change). The loopback listener binds
-127.0.0.1:8888 exclusively *before* the browser opens, validates the CSRF
-`state`, and never echoes attacker-controlled input. Tokens travel over
-WinHTTP (schannel); the refresh token is DPAPI-encrypted at rest. After
-connecting, playback starts on your device (Premium required for control —
-capture of already-playing audio needs nothing) and the HUD shows
-now-playing (`♪ track — artist`), silently resumed on later launches.
+`B` signs you in to Spotify once through your browser (no client secret; the
+client ID lives in `wavescope.ini`, yours to change) and starts playback on
+your device. The sign-in returns to a local listener on 127.0.0.1:8888,
+opened before the browser and matched to that one request; calls go over
+WinHTTP and your stored sign-in is kept for your Windows user account, so
+signing in again is rare. Playback control needs Premium (visualizing
+already-playing audio needs nothing), and the HUD shows now-playing
+(`♪ track — artist`), resumed on later launches.
 
 ## Persistence
 
 `wavescope.ini` beside the exe: mode, engine (incl. MILK library folder),
 palette + custom palettes, resolution, shuffle (incl. include-list), calm,
-window placement, Spotify client ID + DPAPI-wrapped refresh token. The
-primary window's setup is what persists; source intentionally resets to
-loopback each launch.
+window placement, and your Spotify sign-in (client ID + stored login, tied
+to your Windows user account). The primary window's setup is what persists;
+source intentionally resets to system audio each launch.
 
 ## Launch flags
 
@@ -175,8 +175,8 @@ minimize hides to tray (and rendering fully stops while hidden).
   textures.
 - `src/projectm_host.inl` — the MilkDrop engine host: WGL host, libprojectM,
   preset scan/sort/hot-reload.
-- `src/spotify.inl` — PKCE flow, loopback listener, WinHTTP, DPAPI tokens,
-  now-playing poller.
+- `src/spotify.inl` — the Spotify sign-in flow, local return listener,
+  WinHTTP calls, stored login, now-playing poller.
 - `src/record.inl` — MP4 clip recorder (Media Foundation SinkWriter).
 - `src/spout_out.inl` — Spout output wrapper (`third_party/spout`).
 - `src/ui_paint.inl` — the abstract UI painter (one UI, every engine).
@@ -185,8 +185,8 @@ minimize hides to tray (and rendering fully stops while hidden).
 
 ## Dependencies
 
-OS facilities everywhere they exist (WinHTTP, DPAPI, bcrypt, Media Foundation,
-WASAPI, D2D/DirectWrite/WIC, WGL), two vendored dependencies (libprojectM
+OS facilities everywhere they exist (WinHTTP, Media Foundation, WASAPI,
+D2D/DirectWrite/WIC, WGL, and the OS secret-store APIs), two vendored dependencies (libprojectM
 4.x, LGPL-2.1, pinned, built from `C:\projects\projectm`; the Spout SDK's
 DX subset, BSD-2-Clause, pinned in-tree), and small hand-rolled code only
 where it is boring and testable (ini, flat JSON reads, base64url).
