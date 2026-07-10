@@ -1501,6 +1501,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (a->pmHost.ready) a->pmHost.Resize(LOWORD(lp), HIWORD(lp));
         if (a->shaderHost.ready) a->shaderHost.Resize(LOWORD(lp), HIWORD(lp));
         return 0;
+    case WM_SETCURSOR:
+        // Force the arrow over the client area. The bottom sizing border flips
+        // the cursor to a resize double-arrow when you graze it to reveal the
+        // deck, and it can stay stuck; this pins it back. Borders still resize.
+        if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
+        break;
     case WM_MOUSEMOVE:
         a->OnMouseMove((short)LOWORD(lp), (short)HIWORD(lp));
         return 0;
