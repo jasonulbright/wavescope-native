@@ -10,3 +10,7 @@ selftest-*.png
 wavescope-selftest.log
 wavescope-*.mp4
 WaveScope.exe.manifest
+
+# Scratch annotation/comparison screenshots (kept on disk, out of git)
+Untitled*.png
+diffs.png
