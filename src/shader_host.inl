@@ -599,10 +599,11 @@ struct ShaderHost {
         pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
         pfd.iPixelType = PFD_TYPE_RGBA; pfd.cColorBits = 32; pfd.cDepthBits = 24;
         int pf = ChoosePixelFormat(dc, &pfd);
-        if (!pf || !SetPixelFormat(dc, pf, &pfd)) return false;
+        // Failures from here tear the partial state down (no leak per retry).
+        if (!pf || !SetPixelFormat(dc, pf, &pfd)) { Destroy(); return false; }
 
         HGLRC legacy = wglCreateContext(dc);
-        if (!legacy) return false;
+        if (!legacy) { Destroy(); return false; }
         wglMakeCurrent(dc, legacy);
 
         auto createAttribs = (PFNWGLCREATECONTEXTATTRIBSARBPROC)wglGetProcAddress("wglCreateContextAttribsARB");
@@ -642,8 +643,9 @@ struct ShaderHost {
         LoadGL(p_BindVertexArray, "glBindVertexArray");
         LoadGL(p_ActiveTexture, "glActiveTexture");
         if (!p_CreateShader || !p_CreateProgram || !p_UseProgram ||
-            !p_GenVertexArrays || !p_Uniform1i || !p_ActiveTexture)
-            return false;
+            !p_GenVertexArrays || !p_Uniform1i || !p_ActiveTexture) {
+            Destroy(); return false;
+        }
 
         p_GenVertexArrays(1, &vao);
 
@@ -655,7 +657,7 @@ struct ShaderHost {
 
         bool any = false;
         for (int i = 0; i < SV_COUNT; i++) any |= BuildProgram(i);
-        if (!any) return false;
+        if (!any) { Destroy(); return false; }
 
         ready = true;
         return true;
