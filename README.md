@@ -25,27 +25,10 @@ Requires Visual Studio 2026 (any edition) and the projectM native build at
 `C:\projects\projectm\install-native` (built there via its
 `build-native.bat`; MSVC/Ninja, shared DLL). The batch file:
 
-1. builds and **runs the unit tests** (`src/tests.cpp`) — a red test fails
-   the build;
-2. builds `WaveScope.exe` (`/MT`, no MSVC redistributable needed for the
+1. builds `WaveScope.exe` (`/MT`, no MSVC redistributable needed for the
    core app);
-3. stages `projectM-4.dll` + `projectM-4-playlist.dll` beside the exe
+2. stages `projectM-4.dll` + `projectM-4-playlist.dll` beside the exe
    (these two need the VC runtime, present wherever VS or the VC redist is).
-
-## Verify
-
-```
-WaveScope.exe selftest
-```
-
-Renders every engine on the demo signal and asserts real output: sweeps all
-34 modes and all 17 shaders (17/17 must compile), records a 1.6 s MP4 and
-re-opens/decodes it, does a Spout roundtrip through an in-process receiver,
-sweeps a spread of the 551 classic presets through the ns-eel parser, dumps
-PNGs of what actually rendered beside the exe, writes
-`wavescope-selftest.log`, and exits nonzero on any failure. Run it after
-every change; CI-in-a-flag. Selftest never writes `wavescope.ini` — your
-engine/mode/palette survive it.
 
 ## The three engines
 
@@ -121,9 +104,7 @@ desktop analog of the web app's `?embed=1` browser source, without the
 browser. The state persists across launches. Implementation is the
 vendored, pinned Spout SDK subset in `third_party/spout` (BSD-2-Clause;
 see `PIN.md` there) — the frame feed reuses the recorder's capture path,
-so the readback cost is only paid while the output is on. `selftest`
-verifies the sender end-to-end with an in-process Spout receiver doing a
-pixel roundtrip.
+so the readback cost is only paid while the output is on.
 
 ## Displays
 
@@ -157,14 +138,14 @@ source intentionally resets to system audio each launch.
 ## Launch flags
 
 `demo` · `file=<path>` · `milkdrop` · `shader` · `wall` · `kiosk` ·
-`install-startup` / `remove-startup` (HKCU Run key, off by default) ·
-`selftest`. Tray icon: right-click for Show/Hide, Always on top, Quit;
+`install-startup` / `remove-startup` (HKCU Run key, off by default).
+Tray icon: right-click for Show/Hide, Always on top, Quit;
 minimize hides to tray (and rendering fully stops while hidden).
 
 ## Source map
 
-- `src/analysis.inl` — the pure math shared with the tests: `AudioFrame`,
-  HSL, `BinLog`, radix-2 FFT, `AnalyzeWindow` (the analyser contract).
+- `src/analysis.inl` — the pure math: `AudioFrame`, HSL, `BinLog`, radix-2
+  FFT, `AnalyzeWindow` (the analyser contract).
 - `src/main.cpp` — infrastructure: `AudioTap` (WASAPI loopback/mic thread,
   ring buffer, file playback, device-change + silence handling, per-consumer
   `ReadNew` cursors), `App` (window, D2D, deck/HUD/panel UI, engines,
@@ -180,16 +161,15 @@ minimize hides to tray (and rendering fully stops while hidden).
 - `src/record.inl` — MP4 clip recorder (Media Foundation SinkWriter).
 - `src/spout_out.inl` — Spout output wrapper (`third_party/spout`).
 - `src/ui_paint.inl` — the abstract UI painter (one UI, every engine).
-- `src/selftest.inl` — the `selftest` harness.
-- `src/tests.cpp` — unit tests for the pure math (run by `build.bat`).
 
 ## Dependencies
 
 OS facilities everywhere they exist (WinHTTP, Media Foundation, WASAPI,
-D2D/DirectWrite/WIC, WGL, and the OS secret-store APIs), two vendored dependencies (libprojectM
-4.x, LGPL-2.1, pinned, built from `C:\projects\projectm`; the Spout SDK's
-DX subset, BSD-2-Clause, pinned in-tree), and small hand-rolled code only
-where it is boring and testable (ini, flat JSON reads, base64url).
+D2D/DirectWrite/WIC, WGL, and the OS secret-store APIs), two vendored
+dependencies (libprojectM 4.x, LGPL-2.1, pinned, built from
+`C:\projects\projectm`; the Spout SDK's DX subset, BSD-2-Clause, pinned
+in-tree), and small hand-rolled code only where it is small and boring
+(ini, flat JSON reads, base64url).
 
 ## Licensing
 
