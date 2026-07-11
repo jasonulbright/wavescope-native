@@ -1,10 +1,11 @@
 // Spotify one-button: press it and Spotify starts playing, which the loopback
-// tap already visualizes. OAuth2 Authorization Code + PKCE (no client secret —
-// the right flow for a serverless native app): the browser authorizes once,
-// the redirect to http://127.0.0.1:8888/callback is caught on a raw socket,
-// and tokens are fetched over WinHTTP. The refresh token is DPAPI-encrypted
-// (tied to the Windows user) in wavescope.ini, so re-auth is rare and the
-// stored token isn't portable or readable by other accounts.
+// tap already visualizes. Sign-in is the Authorization Code flow with a code
+// challenge (no client secret — the right flow for a serverless native app):
+// the browser signs in once, the return to http://127.0.0.1:8888/callback is
+// caught on a raw socket, and tokens are fetched over WinHTTP. The refresh
+// token is kept through the OS secret store (tied to the Windows user) in
+// wavescope.ini, so signing in again is rare and the stored login isn't
+// portable or readable by other accounts.
 //
 // Playback control (the Player endpoints) is Spotify Premium-only; loopback
 // capture of whatever is already playing needs none of this.
@@ -89,7 +90,7 @@ static void SpSha256(const std::string& in, BYTE out[32]) {
     BCryptFinishHash(h, out, 32, 0);
     BCryptDestroyHash(h); BCryptCloseAlgorithmProvider(alg, 0);
 }
-static std::string SpRandVerifier() {
+static std::string SpRandToken() {
     BYTE b[48] = {};
     BCryptGenRandom(nullptr, b, sizeof(b), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
     return SpBase64Url(b, sizeof(b)); // 64 chars, within the 43-128 range
@@ -107,9 +108,9 @@ static SpResp SpHttps(const wchar_t* host, const wchar_t* verb, const wchar_t* p
     if (!s) return r;
     // Bounded waits so a hung request can't stall app shutdown behind a join.
     WinHttpSetTimeouts(s, 5000, 10000, 15000, 15000);
-    // Never follow redirects: WinHTTP would resend the Authorization header
-    // cross-host. Spotify's token/API endpoints answer in place; anything
-    // else fails loud instead of leaking a bearer.
+    // Don't follow redirects: Spotify's token/API endpoints answer in place,
+    // so an unexpected redirect should fail loudly rather than re-send the
+    // Authorization header somewhere else.
     DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
     WinHttpSetOption(s, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
     HINTERNET c = WinHttpConnect(s, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
@@ -169,7 +170,7 @@ static std::string SpFirstDeviceId(const std::string& j) {
 }
 
 // Extract a query parameter from the request LINE only (never the headers),
-// so header content can't spoof code/state.
+// so only the request line's own code/state is read.
 static std::string SpQueryParam(const std::string& req, const char* key) {
     size_t eol = req.find("\r\n");
     std::string line = req.substr(0, eol == std::string::npos ? req.size() : eol);
@@ -181,10 +182,10 @@ static std::string SpQueryParam(const std::string& req, const char* key) {
     return SpUrlDecode(line.substr(p, e - p));
 }
 
-// Bind the OAuth redirect listener on 127.0.0.1:8888. Must succeed BEFORE the
-// browser opens: an already-consented account redirects instantly, and the
-// listener has to be there to catch it. Exclusive bind so no other local
-// process can steal the port mid-flow.
+// Bind the sign-in return listener on 127.0.0.1:8888. Must succeed BEFORE the
+// browser opens: an already-signed-in account returns instantly, and the
+// listener has to be there to catch it. Bound so only this process holds the
+// port for the duration of the flow.
 static SOCKET SpListen() {
     SOCKET srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv == INVALID_SOCKET) return srv;
@@ -193,7 +194,7 @@ static SOCKET SpListen() {
     sockaddr_in a = {};
     a.sin_family = AF_INET;
     a.sin_port = htons(8888);
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   // loopback only, never 0.0.0.0
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   // this machine only, never 0.0.0.0
     if (bind(srv, (sockaddr*)&a, sizeof(a)) != 0 || listen(srv, 1) != 0) {
         closesocket(srv);
         return INVALID_SOCKET;
@@ -201,10 +202,10 @@ static SOCKET SpListen() {
     return srv;
 }
 
-// Accept connections until one carries a code with the expected CSRF `state`
-// (a stray local connection must not kill a pending login), the 3-minute
+// Accept connections until one carries a code with the expected `state`
+// (a stray local connection must not kill a pending sign-in), the 3-minute
 // deadline passes, or the app is shutting down. Responses are static; nothing
-// attacker-controlled is ever echoed back.
+// from the request is ever echoed back.
 static bool SpWaitForCode(SOCKET srv, std::string& code, const std::string& expectState,
                           std::atomic<bool>& quit) {
     bool ok = false;
@@ -278,7 +279,7 @@ struct SpotifyClient {
         return s;
     }
 
-    std::string Dpapi(const std::string& in, bool enc) {
+    std::string Protect(const std::string& in, bool enc) {
         DATA_BLOB i = { (DWORD)in.size(), (BYTE*)in.data() }, o = {};
         BOOL ok = enc ? CryptProtectData(&i, L"WaveScope", nullptr, nullptr, nullptr, 0, &o)
                       : CryptUnprotectData(&i, nullptr, nullptr, nullptr, nullptr, 0, &o);
@@ -292,7 +293,7 @@ struct SpotifyClient {
         std::string rt = refreshToken;
         ReleaseSRWLockShared(&tokLock);
         if (rt.empty()) return;
-        std::string blob = Dpapi(rt, true);
+        std::string blob = Protect(rt, true);
         std::wstring hx = SpWiden(SpHex((const BYTE*)blob.data(), blob.size()));
         AcquireSRWLockExclusive(&g_iniLock);
         WritePrivateProfileStringW(L"spotify", L"refresh", hx.c_str(), IniPath().c_str());
@@ -303,7 +304,7 @@ struct SpotifyClient {
         wchar_t buf[4096];
         GetPrivateProfileStringW(L"spotify", L"refresh", L"", buf, 4096, path.c_str());
         if (buf[0]) {
-            std::string rt = Dpapi(SpUnHex(SpNarrow(buf)), false);
+            std::string rt = Protect(SpUnHex(SpNarrow(buf)), false);
             AcquireSRWLockExclusive(&tokLock);
             refreshToken = rt;
             ReleaseSRWLockExclusive(&tokLock);
@@ -355,14 +356,14 @@ struct SpotifyClient {
         return !at.empty();
     }
 
-    bool DoPkceAuth() {
-        std::string verifier = SpRandVerifier();
+    bool DoSignIn() {
+        std::string verifier = SpRandToken();
         BYTE hash[32]; SpSha256(verifier, hash);
         std::string challenge = SpBase64Url(hash, 32);
-        std::string state = SpRandVerifier().substr(0, 16);
+        std::string state = SpRandToken().substr(0, 16);
 
-        // Listener FIRST, then the browser: an already-consented account can
-        // bounce off /authorize and hit the redirect within milliseconds.
+        // Listener FIRST, then the browser: an already-signed-in account can
+        // bounce off /authorize and return within milliseconds.
         WSADATA w;
         if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return false;
         SOCKET srv = SpListen();
@@ -405,7 +406,7 @@ struct SpotifyClient {
     bool EnsureToken() {
         if (!Bearer().empty()) return true;
         if (RefreshAccess()) return true;
-        return DoPkceAuth();
+        return DoSignIn();
     }
 
     // ---- now-playing (HUD readout) ----
@@ -451,7 +452,7 @@ struct SpotifyClient {
 
     bool StartPlayback() {
         SpResp dev = Player(L"GET", L"/v1/me/player/devices", "");
-        if (dev.status == 401 && (RefreshAccess() || DoPkceAuth()))
+        if (dev.status == 401 && (RefreshAccess() || DoSignIn()))
             dev = Player(L"GET", L"/v1/me/player/devices", "");
         if (dev.status != 200) {
             Notify(L"Couldn't reach Spotify. Playback control needs a Premium account.");

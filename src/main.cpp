@@ -2464,7 +2464,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     if (opts.installStartup) { SetAutoStart(true);  return 0; }
     if (opts.removeStartup)  { SetAutoStart(false); return 0; }
 
-    g_spotify.LoadToken(); // restore the DPAPI-encrypted Spotify refresh token
+    g_spotify.LoadToken(); // restore the stored Spotify sign-in
 
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WndProc;
@@ -2546,7 +2546,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         UpdateCursorHide(g_views[0]->Now());
     }
 done:
-    g_spotify.Shutdown(); // join the OAuth worker before statics tear down
+    g_spotify.Shutdown(); // join the Spotify worker before statics tear down
     if (!g_views.empty()) g_views[0]->SaveConfig(); // primary window's setup persists
     if (g_cursorHidden) { while (ShowCursor(TRUE) < 0) {} g_cursorHidden = false; }
     TrayRemove();
