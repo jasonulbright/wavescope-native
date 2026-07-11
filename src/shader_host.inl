@@ -665,7 +665,7 @@ struct ShaderHost {
 
     const wchar_t* ShaderName(int idx) const { return SV_NAMES[(idx % SV_COUNT + SV_COUNT) % SV_COUNT]; }
     int ShaderCount() const { return SV_COUNT; }
-    // How many programs actually compiled+linked (selftest asserts == SV_COUNT).
+    // How many programs actually compiled+linked.
     int CompiledCount() const {
         int n = 0;
         for (const ShaderProg& p : progs) if (p.prog) n++;

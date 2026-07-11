@@ -1,9 +1,8 @@
-// The pure analysis math, shared by the app (main.cpp) and the unit tests
-// (tests.cpp): the AudioFrame contract, HSL color, log-axis FFT sampling,
-// the radix-2 FFT, and the Web-Audio-analyser-compatible per-window analysis
-// (Blackman window, |X|/N, 0.8 smoothing on linear magnitudes, [-100,-30] dB
-// mapping, Hz-based band split, RMS level, bass-flux beat envelope).
-// No I/O, no threads, no Windows calls — everything here is testable.
+// The pure analysis math: the AudioFrame contract, HSL color, log-axis FFT
+// sampling, the radix-2 FFT, and the Web-Audio-analyser-compatible per-window
+// analysis (Blackman window, |X|/N, 0.8 smoothing on linear magnitudes,
+// [-100,-30] dB mapping, Hz-based band split, RMS level, bass-flux beat
+// envelope). No I/O, no threads, no Windows calls.
 
 static const float PI  = 3.14159265358979f;
 static const float TAU = 6.28318530717959f;
