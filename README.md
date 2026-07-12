@@ -102,9 +102,9 @@ floor, e^-6dt decay). Same music, same numbers, both apps.
 | `R` | record clip → `wavescope-<timestamp>.mp4` (H.264 + AAC) |
 | `O` | Spout output — OBS/Resolume ingest the visual as sender "WaveScope" |
 | `B` | Spotify: authorize once + start playback (Premium) |
-| `S` | shuffle timer (off / 15s / 30s / 1m / 5m / **DJ**) |
+| `S` | shuffle timer (off / 15s / 30s / 1m / 5m / **DJ** / **VJ**) |
 | `C` | calm mode (photosensitive-safe: no burst modes, softened beat) |
-| `L` | MilkDrop preset folder |
+| `L` | preset lab — edit the active preset's `.milk`, apply, save |
 | `T` | always on top |
 | `F` | fullscreen — `H` HUD — `F1` / `?` help |
 | `ESC` | close panel / menu / help / fullscreen, then quit |
@@ -116,7 +116,24 @@ already native resolution — and the HUD's RES line reports the pixels
 actually rendered either way. The deck reveals when the mouse nears the
 bottom edge and hides after 3 s idle; under GPU/projectM the trace-palette
 controls hide (they color the built-in modes), web-style. DJ shuffle hops
-engine AND visual every 30 s.
+engine AND visual every 30 s; VJ shuffle switches on the music itself — a
+bass drop hard-cuts, a long lull morphs.
+
+## MilkDrop: morph, lab, VJ
+
+Under the projectM engine the deck grows a **MORPH** row: a target dropdown
+(`shuffle`, or any preset in the library), a 0.5–10 s blend slider, and a
+`morph` button that cross-fades from the playing preset to the target using
+the engine's soft cut. Timed shuffle uses that same blend length, so preset
+hops glide instead of cutting; `VJ` shuffle drops on the beat and morphs
+through the lulls. The blend length is saved in `wavescope.ini`.
+
+`L` (or the deck's `lab (L)` button) opens the **preset lab** — a live editor
+over the active preset's whole `.milk` source. `Ctrl+Enter` (or `apply`)
+recompiles it against the running signal; a syntax error keeps the previous
+preset on screen and shows the engine's message. `save` writes the edit to
+`presets\user\` and switches the picker to it. To point MILK at your own
+`.milk` archive, click the `milkdrop` deck button again.
 
 ## Recording
 
