@@ -166,6 +166,7 @@ static int RunSelfTest(App* v) {
     };
     int rc = 0;
     g_tap.SetSource(AudioTap::SRC_DEMO);
+    out(L"selftest: WaveScope %s", WAVESCOPE_VERSION);
     out(L"selftest: source=%s sampleRate=%u", g_tap.SourceName(), g_tap.SampleRate());
 
     // --- built-in D2D modes ---
