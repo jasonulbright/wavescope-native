@@ -15,6 +15,8 @@
 // Single source of truth for the release version; package.bat parses it.
 #define WAVESCOPE_VERSION L"1.0.0"
 
+#include "resource.h"
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -571,6 +573,12 @@ struct App {
                              { 0.95f, 0.96f, 0.94f } };  // dark -> bright
     std::wstring newName;              // new-palette name field
     bool nameFocused = false;          // name field has keyboard focus
+    // Paged dropdown state: a picker with more columns than MENU_MAXCOLS (only
+    // the 551-preset MILK library today) turns into a fixed-size page with a
+    // ‹ N / M › pager and a jump-to-page field. Small menus ignore all of this.
+    int menuPage = 0;                  // current page of the open dropdown
+    bool pageFocused = false;          // jump-to-page field has keyboard focus
+    std::wstring pageInput;            // digits typed into the jump-to-page field
     int modeIdx = 0;
     int paletteIdx = 0;
     int resIdx = 0;          // index into RES_OPTS
@@ -686,6 +694,8 @@ struct App {
             for (int k = 0; k < 3; k++) for (int c = 0; c < 3; c++)
                 sig += L"." + std::to_wstring((int)(newStops[k][c] * 255));
         }
+        if (deckMenu >= 0)   // paged dropdown: page + jump-field state
+            sig += L"|M" + std::to_wstring(menuPage) + std::to_wstring(pageFocused) + pageInput;
         if (olSig == sig) return false; // unchanged — reuse the cached texture
         olSig = sig;
 
@@ -1273,12 +1283,12 @@ struct App {
         case DK_SPOT:  g_spotify.OneButton(); break;
         case DK_PREV:  CyclePick(-1); break;
         case DK_NEXT:  CyclePick(1); break;
-        case DK_WAVE:  if (pmActive) ToggleProjectM(); if (shaderActive) ToggleShader(); deckMenu = DK_PICK; break;
-        case DK_GPU:   if (pmActive) ToggleProjectM(); if (!shaderActive) ToggleShader(); deckMenu = DK_PICK; break;
-        case DK_PROJM: EnterProjectM(false); deckMenu = DK_PICK; break;
-        case DK_MILK:  EnterProjectM(true);  deckMenu = DK_PICK; break;
+        case DK_WAVE:  if (pmActive) ToggleProjectM(); if (shaderActive) ToggleShader(); OpenMenu(DK_PICK); break;
+        case DK_GPU:   if (pmActive) ToggleProjectM(); if (!shaderActive) ToggleShader(); OpenMenu(DK_PICK); break;
+        case DK_PROJM: EnterProjectM(false); OpenMenu(DK_PICK); break;
+        case DK_MILK:  EnterProjectM(true);  OpenMenu(DK_PICK); break;
         case DK_PICK: case DK_TRACE: case DK_SHUF: case DK_RES: case DK_DISP:
-                       deckMenu = (prev == i ? -1 : i); break;   // toggle this dropdown
+                       if (prev == i) deckMenu = -1; else OpenMenu(i); break;   // toggle this dropdown
         case DK_CALM:  SetCalm(!calm); break;
         case DK_PALS:  OpenPalettePanel(); break;
         case DK_REC:   ToggleRecord(); break;
@@ -1412,7 +1422,8 @@ struct App {
     void MenuSelect(int a, int i) {
         switch (a) {
         case DK_PICK:
-            if (pmActive) pmHost.LoadPreset(i, true);
+            // Hard cut: the soft cross-fade white-flashes (projectm_host.inl).
+            if (pmActive) pmHost.LoadPreset(i, false);
             else if (shaderActive) shaderIdx = i;
             else modeIdx = i;
             break;
@@ -1428,39 +1439,103 @@ struct App {
             break;
         }
     }
-    // Lay the open dropdown out above its anchor button, wrapping into columns
-    // so long lists (34 modes, big preset libraries) fit above the deck.
-    void MenuGeom(int a, float W, float H, D2D1_RECT_F& bg, std::vector<D2D1_RECT_F>& rows) {
-        rows.clear();
+    // The paged dropdown never grows past this many columns; beyond it, the
+    // list pages instead of running off the screen. Rows cap too, so a page
+    // holds at most 4 x 15 = 60 entries — denser reads as a wall of text.
+    static const int MENU_MAXCOLS = 4;
+    static const int MENU_MAXROWS = 15;
+    // Footer controls for a paged dropdown (empty rects when not paged).
+    struct MenuChrome { bool paged = false; int pages = 1; D2D1_RECT_F prev{}, next{}, field{}; };
+
+    // Column/row grid for anchor `a`'s dropdown. perCol is derived from the
+    // height above the deck (as before); cols is capped at MENU_MAXCOLS, so a
+    // list longer than one page (pageSize = cols*perCol) pages rather than
+    // adding columns sideways. Small lists come out identical to before.
+    void MenuMetrics(int a, float W, float H, int& cols, int& perCol, int& pageSize, int& pages) {
+        int n = MenuCount(a);
+        D2D1_RECT_F b[DK_N]; DeckLayout(W, H, b);
+        const float rh = 24, pad = 5, topLimit = 8;
+        float bottom = b[a].top - 8;
+        perCol = (int)((bottom - topLimit - 2 * pad) / rh);
+        if (perCol > MENU_MAXROWS) perCol = MENU_MAXROWS;
+        if (perCol < 1) perCol = 1;
+        if (perCol > n && n > 0) perCol = n;
+        int natural = (n + perCol - 1) / perCol;
+        cols = natural < MENU_MAXCOLS ? natural : MENU_MAXCOLS;
+        if (cols < 1) cols = 1;
+        pageSize = cols * perCol;
+        pages = pageSize > 0 ? (n + pageSize - 1) / pageSize : 1;
+        if (pages < 1) pages = 1;
+    }
+
+    // Open dropdown `a`, starting on the page that holds its current selection
+    // and clearing any prior jump-field state.
+    void OpenMenu(int a) {
+        deckMenu = a; pageFocused = false; pageInput.clear(); menuPage = 0;
+        if (!rt) return;
+        float sc = UiScale(); D2D1_SIZE_F sz = rt->GetSize();
+        int cols, perCol, pageSize, pages;
+        MenuMetrics(a, sz.width / sc, sz.height / sc, cols, perCol, pageSize, pages);
+        int cur = MenuCurrent(a);
+        if (cur > 0 && pageSize > 0) menuPage = cur / pageSize;
+        if (menuPage >= pages) menuPage = pages - 1;
+        if (menuPage < 0) menuPage = 0;
+    }
+
+    // Lay the open dropdown out above its anchor button. Rows is sized to the
+    // full list; entries not on the current page get a dead rect (off-screen)
+    // so draw/click can key off the real index without any offset arithmetic.
+    void MenuGeom(int a, float W, float H, D2D1_RECT_F& bg,
+                  std::vector<D2D1_RECT_F>& rows, MenuChrome& ch) {
+        rows.clear(); ch = MenuChrome{};
         int n = MenuCount(a);
         if (n <= 0 || DeckHidden(a)) { bg = D2D1::RectF(0, 0, 0, 0); return; }
+        int cols, perCol, pageSize, pages;
+        MenuMetrics(a, W, H, cols, perCol, pageSize, pages);
+        ch.paged = pages > 1; ch.pages = pages;
+        if (menuPage >= pages) menuPage = pages - 1;   // list may have shrunk
+        if (menuPage < 0) menuPage = 0;
         D2D1_RECT_F b[DK_N]; DeckLayout(W, H, b);
         const float rw = 192, rh = 24, pad = 5, colGap = 4, topLimit = 8; // web select max-w-48
+        const float footerH = ch.paged ? 30.0f : 0.0f;
         float bottom = b[a].top - 8;
-        int perCol = (int)((bottom - topLimit - 2 * pad) / rh);
-        if (perCol < 1) perCol = 1;
-        if (perCol > n) perCol = n;
-        int cols = (n + perCol - 1) / perCol;
         float menuW = cols * rw + (cols - 1) * colGap + 2 * pad;
-        float menuH = perCol * rh + 2 * pad;
+        float menuH = perCol * rh + 2 * pad + footerH;
         float x = b[a].left;
         if (x + menuW > W - 8) x = W - 8 - menuW;
         if (x < 8) x = 8;
         float top = bottom - menuH;
         if (top < topLimit) top = topLimit;
         bg = D2D1::RectF(x, top, x + menuW, top + menuH);
-        rows.resize(n);
-        for (int i = 0; i < n; i++) {
-            int c = i / perCol, r = i % perCol;
+        rows.assign(n, D2D1::RectF(-9, -9, -9, -9));   // off-page = dead rect
+        int start = menuPage * pageSize, end = start + pageSize;
+        if (end > n) end = n;
+        for (int i = start; i < end; i++) {
+            int k = i - start, c = k / perCol, r = k % perCol;
             float rx = x + pad + c * (rw + colGap);
             float ry = top + pad + r * rh;
             rows[i] = D2D1::RectF(rx, ry, rx + rw, ry + rh - 2);
         }
+        if (ch.paged) {
+            float fy = top + perCol * rh + 2 * pad + 4, fh = 22;
+            ch.prev  = D2D1::RectF(x + pad, fy, x + pad + 26, fy + fh);
+            ch.field = D2D1::RectF(x + pad + 34, fy, x + pad + 34 + 92, fy + fh);
+            ch.next  = D2D1::RectF(x + menuW - pad - 26, fy, x + menuW - pad, fy + fh);
+        }
+    }
+    // Columns are a fixed 192px; the row font is monospace (Consolas 12), so a
+    // name past ~26 chars is clipped to one line with an ellipsis rather than
+    // wrapping into the row below.
+    std::wstring MenuFit(const wchar_t* s) {
+        std::wstring w = s;
+        const size_t maxc = 26;
+        if (w.size() > maxc) { w.resize(maxc - 1); w += L"\x2026"; }
+        return w;
     }
     void DrawMenu(UIPainter& p) {
         if (deckMenu < 0) return;
-        D2D1_RECT_F bg; std::vector<D2D1_RECT_F> rows;
-        MenuGeom(deckMenu, p.W(), p.H(), bg, rows);
+        D2D1_RECT_F bg; std::vector<D2D1_RECT_F> rows; MenuChrome ch;
+        MenuGeom(deckMenu, p.W(), p.H(), bg, rows, ch);
         if (rows.empty()) return;
         // Dropdown card: scope ground with a white/15 hairline (web chrome).
         p.Rect(bg.left, bg.top, bg.right - bg.left, bg.bottom - bg.top,
@@ -1468,33 +1543,61 @@ struct App {
         p.Stroke(bg.left, bg.top, bg.right - bg.left, bg.bottom - bg.top, 1, 1, 1, 0.15f, 1.0f);
         int cur = MenuCurrent(deckMenu);
         for (int i = 0; i < (int)rows.size(); i++) {
+            if (rows[i].left < 0) continue;   // not on the current page
             bool active = (i == cur), off = MenuDisabled(deckMenu, i);
             float rw2 = rows[i].right - rows[i].left, rh2 = rows[i].bottom - rows[i].top;
+            std::wstring label = MenuFit(MenuItem(deckMenu, i));
             if (active) {
                 p.Rect(rows[i].left, rows[i].top, rw2, rh2, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 0.22f);
                 p.Stroke(rows[i].left, rows[i].top, rw2, rh2, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 0.9f, 1.0f);
                 p.Text(rows[i].left + 10, rows[i].top + 3, rw2 - 14, rh2 - 3,
-                       MenuItem(deckMenu, i), UI_SOFT_R, UI_SOFT_G, UI_SOFT_B, 1.0f);
+                       label.c_str(), UI_SOFT_R, UI_SOFT_G, UI_SOFT_B, 1.0f);
             } else {
                 p.Text(rows[i].left + 10, rows[i].top + 3, rw2 - 14, rh2 - 3,
-                       MenuItem(deckMenu, i), 1, 1, 1, off ? 0.35f : 0.80f);
+                       label.c_str(), 1, 1, 1, off ? 0.35f : 0.80f);
             }
         }
+        if (ch.paged) DrawPager(p, ch);
+    }
+    // The ‹ N / M › footer under a paged dropdown: prev/next buttons reuse the
+    // deck's chevron glyphs; the box mirrors the palette name-field styling and
+    // shows the current page (with a caret while it's being typed into).
+    void DrawPager(UIPainter& p, const MenuChrome& ch) {
+        auto btn = [&](const D2D1_RECT_F& r, const wchar_t* glyph) {
+            float w = r.right - r.left, h = r.bottom - r.top;
+            p.Stroke(r.left, r.top, w, h, 1, 1, 1, 0.30f, 1.0f);
+            p.Text(r.left, r.top, w, h, glyph, 1, 1, 1, 0.85f, true);
+        };
+        btn(ch.prev, L"\x2039");
+        btn(ch.next, L"\x203A");
+        float fw = ch.field.right - ch.field.left, fh = ch.field.bottom - ch.field.top;
+        p.Rect(ch.field.left, ch.field.top, fw, fh, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.96f);
+        p.Stroke(ch.field.left, ch.field.top, fw, fh, 1, 1, 1, pageFocused ? 0.40f : 0.15f, 1.0f);
+        std::wstring cur = pageFocused ? (pageInput + L"_") : std::to_wstring(menuPage + 1);
+        wchar_t buf[40]; swprintf_s(buf, L"%s / %d", cur.c_str(), ch.pages);
+        p.Text(ch.field.left + 8, ch.field.top + 3, fw - 12, fh - 3, buf, 1, 1, 1, 0.85f);
     }
     bool MenuClick(int mx, int my) {
         if (deckMenu < 0) return false;
         float sc = UiScale();
         D2D1_SIZE_F sz = rt->GetSize();
-        D2D1_RECT_F bg; std::vector<D2D1_RECT_F> rows;
-        MenuGeom(deckMenu, sz.width / sc, sz.height / sc, bg, rows);
-        for (int i = 0; i < (int)rows.size(); i++)
+        D2D1_RECT_F bg; std::vector<D2D1_RECT_F> rows; MenuChrome ch;
+        MenuGeom(deckMenu, sz.width / sc, sz.height / sc, bg, rows, ch);
+        if (ch.paged) {   // pager controls take clicks before the rows
+            if (In(ch.prev, mx, my))  { if (menuPage > 0) menuPage--; pageFocused = false; return true; }
+            if (In(ch.next, mx, my))  { if (menuPage < ch.pages - 1) menuPage++; pageFocused = false; return true; }
+            if (In(ch.field, mx, my)) { pageFocused = true; pageInput.clear(); return true; }
+        }
+        for (int i = 0; i < (int)rows.size(); i++) {
+            if (rows[i].left < 0) continue;   // not on the current page
             if (In(rows[i], mx, my)) {
                 if (MenuDisabled(deckMenu, i)) return true;   // disabled: swallow, don't select
-                MenuSelect(deckMenu, i); deckMenu = -1; return true;
+                MenuSelect(deckMenu, i); deckMenu = -1; pageFocused = false; return true;
             }
+        }
         if (In(bg, mx, my)) return true;   // swallow clicks inside the menu chrome
-        deckMenu = -1;                     // click elsewhere closes it
-        return false;                      // ...and falls through to the deck
+        deckMenu = -1; pageFocused = false;   // click elsewhere closes it
+        return false;                         // ...and falls through to the deck
     }
 
     // Mouse near the bottom edge reveals the deck; hovering keeps it alive.
@@ -1886,6 +1989,26 @@ struct App {
         else if (c == 13) AddNewPalette();
         else if (c >= 32 && newName.size() < 22) newName += c;
     }
+    // Jump-to-page field: digits only, Enter jumps to that page (1-based,
+    // clamped), Backspace edits, and both Enter and a committed jump un-focus.
+    void PageChar(wchar_t c) {
+        if (deckMenu < 0 || !pageFocused) return;
+        if (c == 8) { if (!pageInput.empty()) pageInput.pop_back(); return; }
+        if (c == 13) {
+            if (!pageInput.empty() && rt) {
+                float sc = UiScale(); D2D1_SIZE_F sz = rt->GetSize();
+                int cols, perCol, pageSize, pages;
+                MenuMetrics(deckMenu, sz.width / sc, sz.height / sc, cols, perCol, pageSize, pages);
+                int pg = _wtoi(pageInput.c_str()) - 1;
+                if (pg < 0) pg = 0;
+                if (pg >= pages) pg = pages - 1;
+                menuPage = pg;
+            }
+            pageFocused = false; pageInput.clear();
+            return;
+        }
+        if (c >= L'0' && c <= L'9' && pageInput.size() < 3) pageInput += c;
+    }
 
     struct PalRects {
         D2D1_RECT_F card, close, master, swatch[3], preview, nameBox, addBtn;
@@ -2174,7 +2297,8 @@ static void TrayAdd(HWND hwnd) {
     g_tray.uID = 1;
     g_tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_tray.uCallbackMessage = WM_TRAY;
-    g_tray.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    g_tray.hIcon = (HICON)LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+                                      GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
     wcscpy_s(g_tray.szTip, L"WaveScope");
     if (Shell_NotifyIconW(NIM_ADD, &g_tray)) g_trayAdded = true;
 }
@@ -2262,6 +2386,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == VK_ESCAPE) { a->nameFocused = false; }
             return 0;
         }
+        // While the jump-to-page field has focus, keys drive that field (the
+        // digits/Backspace/Enter arrive as WM_CHAR); swallow everything else so
+        // it can't leak into shortcuts. ESC un-focuses but leaves the menu open.
+        if (a->deckMenu >= 0 && a->pageFocused) {
+            if (wp == VK_ESCAPE) a->pageFocused = false;
+            return 0;
+        }
+        // A paged dropdown is open (field unfocused): Left/Right page it rather
+        // than live-cycling the visual behind it.
+        if (a->deckMenu >= 0 && (wp == VK_LEFT || wp == VK_RIGHT) && a->rt) {
+            int cols, perCol, pageSize, pages;
+            float sc = a->UiScale(); D2D1_SIZE_F sz = a->rt->GetSize();
+            a->MenuMetrics(a->deckMenu, sz.width / sc, sz.height / sc, cols, perCol, pageSize, pages);
+            if (pages > 1) {
+                if (wp == VK_LEFT  && a->menuPage > 0)          a->menuPage--;
+                if (wp == VK_RIGHT && a->menuPage < pages - 1)  a->menuPage++;
+                return 0;
+            }
+        }
         switch (wp) {
         case VK_SPACE:
         case VK_RIGHT:
@@ -2285,7 +2428,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'L':      a->OpenPresetFolder(); break;
         case 'M':      // web parity: M = displays
             a->deckVisible = true; a->deckActivity = a->Now();
-            a->deckMenu = (a->deckMenu == App::DK_DISP ? -1 : App::DK_DISP);
+            if (a->deckMenu == App::DK_DISP) a->deckMenu = -1; else a->OpenMenu(App::DK_DISP);
             break;
         case 'E':      a->CycleEngine(); break;       // WaveScope -> GPU -> projectM
         case 'G':      a->ToggleShader(); break;      // jump straight to GPU
@@ -2310,7 +2453,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_CHAR:
-        a->PanelChar((wchar_t)wp);
+        if (a->deckMenu >= 0 && a->pageFocused) a->PageChar((wchar_t)wp);
+        else a->PanelChar((wchar_t)wp);
         return 0;
     case WM_TRAY:
         if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {
@@ -2487,12 +2631,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
     g_spotify.LoadToken(); // restore the stored Spotify sign-in
 
-    WNDCLASSW wc = {};
+    WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm = (HICON)LoadImageW(hInstance, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON,
+                                    GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
     wc.lpszClassName = L"WaveScopeWindow";
-    RegisterClassW(&wc);
+    RegisterClassExW(&wc);
 
     // "wall" fills every display: a borderless primary on the first monitor
     // plus companion windows on the rest, all driven by the one tap.
