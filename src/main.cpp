@@ -12,6 +12,9 @@
 // All 34 WaveScope modes are ported (viz_modes.inl) across six palettes, and
 // the real MilkDrop engine runs via projectM (projectm_host.inl).
 
+// Single source of truth for the release version; package.bat parses it.
+#define WAVESCOPE_VERSION L"1.0.0"
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
@@ -1595,7 +1598,7 @@ struct App {
     // Full keymap overlay (F1 / ?), a centered card over any engine.
     void DrawHelpP(UIPainter& p) {
         static const wchar_t* HELP =
-            L"WAVESCOPE  \x2014  KEYS\n"
+            L"WAVESCOPE " WAVESCOPE_VERSION L"  \x2014  KEYS\n"
             L"\n"
             L"SPACE / \x2192      next mode (or preset / shader)\n"
             L"\x2190              previous\n"
