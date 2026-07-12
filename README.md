@@ -15,6 +15,16 @@ MilkDrop library in original form — and adds the things only a desktop app
 can do: silent WASAPI loopback, MP4 clip recording, companion displays from
 one engine, Spout output for OBS, always-on-top, tray, launch at login.
 
+## Get it
+
+Grab `WaveScope-v<version>-win64.zip` from the repo's Releases, unzip
+anywhere — USB stick included — and run `WaveScope.exe`. The zip carries
+everything: the projectM DLLs, their app-local VC++ runtime, both preset
+libraries with the texture pack, and the third-party notices. Fully
+portable: settings live in `wavescope.ini` beside the exe, nothing touches
+the registry except the opt-in launch-at-login key, and deleting the
+folder removes every trace.
+
 ## Build
 
 ```
@@ -46,6 +56,13 @@ PNGs of what actually rendered beside the exe, writes
 `wavescope-selftest.log`, and exits nonzero on any failure. Run it after
 every change; CI-in-a-flag. Selftest never writes `wavescope.ini` — your
 engine/mode/palette survive it.
+
+## Package
+
+`package.bat` builds (unit-test gate included), stages the portable layout
+under `dist\`, runs the **staged** exe's selftest as the release gate — the
+zip layout has to prove it runs standalone — and produces
+`dist\WaveScope-v<version>-win64.zip`.
 
 ## The three engines
 
@@ -146,6 +163,11 @@ signing in again is rare. Playback control needs Premium (visualizing
 already-playing audio needs nothing), and the HUD shows now-playing
 (`♪ track — artist`), resumed on later launches.
 
+The bundled client ID is this project's registered Spotify app. If new
+sign-ins are refused (Spotify limits development-mode apps to allowlisted
+users), create your own free app at developer.spotify.com and put its
+client ID in `wavescope.ini`.
+
 ## Persistence
 
 `wavescope.ini` beside the exe: mode, engine (incl. MILK library folder),
@@ -202,3 +224,6 @@ where it is boring and testable (ini, flat JSON reads, base64url).
 - **MilkDrop preset + texture packs** — community-distributed content,
   redistributed from the projectM-visualizer org (`presets-classic/` and
   `textures/`; the pack's own README ships alongside).
+
+Full license texts and exact upstream pins live in
+`THIRD-PARTY-NOTICES.txt` (repo root, and inside every release zip).
