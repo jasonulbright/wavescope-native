@@ -15,6 +15,8 @@ MilkDrop library in original form — and adds the things only a desktop app
 can do: silent WASAPI loopback, MP4 clip recording, companion displays from
 one engine, Spout output for OBS, always-on-top, tray, launch at login.
 
+![The projectM engine with the control deck: preset picker, engines, shuffle, and the morph row](assets/screenshot-deck.png)
+
 ## Get it
 
 Grab `WaveScope-v<version>-win64.zip` from the repo's Releases, unzip
@@ -134,6 +136,8 @@ recompiles it against the running signal; a syntax error keeps the previous
 preset on screen and shows the engine's message. `save` writes the edit to
 `presets\user\` and switches the picker to it. To point MILK at your own
 `.milk` archive, click the `milkdrop` deck button again.
+
+![The preset lab editing wavescope-tunnel.milk over the running engine](assets/screenshot-lab.png)
 
 ## Recording
 
