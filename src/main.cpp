@@ -13,7 +13,7 @@
 // the real MilkDrop engine runs via projectM (projectm_host.inl).
 
 // Single source of truth for the release version; package.bat parses it.
-#define WAVESCOPE_VERSION L"1.0.0"
+#define WAVESCOPE_VERSION L"1.1.0"
 
 #include "resource.h"
 
