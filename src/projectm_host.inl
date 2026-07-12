@@ -288,6 +288,16 @@ struct ProjectMHost {
         const wchar_t* base = wcsrchr(presetPaths[i].c_str(), L'\\');
         return base ? base + 1 : presetPaths[i].c_str();
     }
+    // Index of the preset with this bare filename (case-insensitive), or -1 if
+    // none matches — the morph deck's named target survives library changes by
+    // resolving the name each time (a gone target falls back to shuffle).
+    int PresetIndexByName(const wchar_t* name) const {
+        for (size_t i = 0; i < presetPaths.size(); i++) {
+            const wchar_t* base = wcsrchr(presetPaths[i].c_str(), L'\\');
+            if (_wcsicmp(base ? base + 1 : presetPaths[i].c_str(), name) == 0) return (int)i;
+        }
+        return -1;
+    }
 
     void Show(bool on) {
         if (child) ShowWindow(child, on ? SW_SHOW : SW_HIDE);

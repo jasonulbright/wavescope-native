@@ -585,6 +585,14 @@ struct App {
     bool calm = false;
     int shuffleIdx = 0;      // index into SHUFFLE_SECS
     float lastShuffle = 0;
+    // Morph deck (projectM engine): blend length (persisted) and target. The
+    // target is a preset name, empty = shuffle (a random other preset); a name
+    // is resolved against the live library each morph, so a gone/renamed target
+    // just falls back to shuffle. Length seeds from the classic 2.7 s blend and
+    // quantizes to 0.5 s as the slider is dragged.
+    float morphSec = 2.7f;
+    std::wstring morphTargetName;   // empty = shuffle
+    bool morphDragging = false;     // slider thumb is being dragged
     bool hud = true;         // master enable (H); when on, auto-fades on idle
     float hudActivity = 0;   // last mouse-move time; HUD fades out after it
     bool help = false;       // F1 / ? full keymap overlay
@@ -686,6 +694,9 @@ struct App {
             // them by key (P/S/R) must dirty the overlay even when l1 is quiet.
             L"|" + std::to_wstring(paletteIdx) + L"." + std::to_wstring(shuffleIdx) +
             L"." + std::to_wstring(resIdx) + L"." + std::to_wstring(rec.Active()) +
+            // Morph deck: length + target ride on deck buttons, so dragging the
+            // slider or repicking the target must re-render the overlay.
+            L"|M" + std::to_wstring((int)(morphSec * 10)) + morphTargetName +
             L"|" + (l1 ? l1 : L"") + L"|" + (l2 ? l2 : L"");
         if (palPanel) {   // capture everything the panel draws so it stays live
             sig += L"|P" + std::to_wstring(shufflePalettes) + std::to_wstring(nameFocused) +
@@ -1084,8 +1095,13 @@ struct App {
            DK_PREV, DK_PICK, DK_NEXT,                    // adaptive mode/preset picker
            DK_WAVE, DK_GPU, DK_PROJM, DK_MILK,           // engines
            DK_TRACE, DK_SHUF, DK_RES,                    // selectors
+           DK_MORPHT, DK_MORPH,                          // morph deck (projectM engine only)
            DK_CALM, DK_PALS, DK_DISP, DK_REC, DK_FULL, DK_HELP, // actions (right cluster)
            DK_N };
+    // The morph group carries a slider between its two buttons (target ▾ and
+    // the morph button); this is the width reserved for the track + value
+    // label in that gap. Only the morph group widens its inter-button gap.
+    static constexpr float MORPH_TRACK_W = 84, MORPH_VALUE_W = 34, MORPH_EXTRA = MORPH_TRACK_W + 6 + MORPH_VALUE_W;
     // The HUD has no button (web parity): H toggles it and it auto-fades when the
     // mouse is idle. The ? overlay documents the H shortcut.
 
@@ -1093,13 +1109,15 @@ struct App {
     // next group carries one) the tiny descriptor label before it.
     static bool DeckGroupEnd(int i) {
         return i == DK_SPOT || i == DK_NEXT || i == DK_MILK ||
-               i == DK_TRACE || i == DK_SHUF || i == DK_RES || i == DK_HELP;
+               i == DK_TRACE || i == DK_SHUF || i == DK_RES ||
+               i == DK_MORPH || i == DK_HELP;
     }
     // Buttons that don't apply to the active engine (web parity: trace
     // palettes, calm and the palette panel are built-in-engine concerns; the
     // C/P/N keys still work everywhere).
     bool DeckHidden(int i) {
         bool alt = pmActive || shaderActive;
+        if (i == DK_MORPHT || i == DK_MORPH) return !pmActive;   // morph is projectM-only
         return alt && (i == DK_TRACE || i == DK_CALM || i == DK_PALS);
     }
     // Tiny dim descriptor drawn before a group's first button (web-style).
@@ -1111,6 +1129,7 @@ struct App {
         case DK_TRACE: return L"TRACE";
         case DK_SHUF:  return L"SHUFFLE";
         case DK_RES:   return L"RES";
+        case DK_MORPHT: return L"MORPH";
         default:       return L"";
         }
     }
@@ -1118,6 +1137,17 @@ struct App {
     float DescWidth(int firstBtn) {
         const wchar_t* d = DeckDescriptor(firstBtn);
         return *d ? (float)wcslen(d) * 6.0f + 12.0f : 0.0f;
+    }
+
+    // The morph target for the deck button: "shuffle" (a random other preset)
+    // or the target preset name, truncated so a long classic name doesn't blow
+    // out the deck button width (the dropdown shows the full list).
+    std::wstring MorphTargetLabel() const {
+        if (morphTargetName.empty()) return L"shuffle";
+        std::wstring s = morphTargetName;
+        const size_t maxc = 18;
+        if (s.size() > maxc) { s.resize(maxc - 1); s += L"\x2026"; }
+        return s;
     }
 
     // The center picker mirrors whichever engine is active; the value buttons
@@ -1136,6 +1166,8 @@ struct App {
         case DK_TRACE: return std::wstring(PaletteName()) + CH;
         case DK_SHUF:  return std::wstring(SHUF_LABELS[shuffleIdx]) + CH;
         case DK_RES:   return std::wstring(RES_OPTS[resIdx].name) + CH;
+        case DK_MORPHT: return MorphTargetLabel() + CH;
+        case DK_MORPH:  return L"morph";
         case DK_CALM:  return L"calm (C)"; case DK_PALS: return L"palettes + shuffle";
         case DK_DISP:  return std::wstring(L"displays") + CH;
         case DK_REC:   return rec.Active() ? L"stop rec (R)" : L"rec (R)";
@@ -1169,14 +1201,15 @@ struct App {
             nat[i] = DeckHidden(i) ? 0.0f : (w < minBtn ? minBtn : w);
         }
 
-        // Left-cluster groups (SRC…RES); the right cluster is DK_CALM..DK_HELP.
-        int gStart[8], gEnd[8], gCount = 0; float gNat[8];
-        for (int i = 0, s = 0; i <= DK_RES; i++) {
+        // Left-cluster groups (SRC…MORPH); the right cluster is DK_CALM..DK_HELP.
+        int gStart[10], gEnd[10], gCount = 0; float gNat[10];
+        for (int i = 0, s = 0; i <= DK_MORPH; i++) {
             if (DeckGroupEnd(i)) {
                 gStart[gCount] = s; gEnd[gCount] = i;
                 float sum = 0; int vis = 0;
                 for (int k = s; k <= i; k++) if (!DeckHidden(k)) { sum += nat[k]; vis++; }
                 if (vis) sum += DescWidth(s) + gap * (vis - 1);
+                if (s == DK_MORPHT && vis) sum += MORPH_EXTRA;   // slider + value-label gap
                 gNat[gCount++] = sum; s = i + 1;
             }
         }
@@ -1186,7 +1219,7 @@ struct App {
         if (rVis > 1) rNat += gap * (rVis - 1);
 
         // Wrap the left cluster into rows, left-justified.
-        int rowOfG[8]; float rowEnd[8]; for (float& e : rowEnd) e = x0;
+        int rowOfG[10]; float rowEnd[10]; for (float& e : rowEnd) e = x0;
         int r = 0; float used = 0;
         for (int g = 0; g < gCount; g++) {
             if (gNat[g] <= 0) { rowOfG[g] = r; continue; }   // fully hidden group
@@ -1204,8 +1237,8 @@ struct App {
         float yTop = H - bottom - totalH;
 
         // Place the left cluster.
-        float bxRow[8]; bool firstInRow[8];
-        for (int i = 0; i < 8; i++) { bxRow[i] = x0; firstInRow[i] = true; }
+        float bxRow[10]; bool firstInRow[10];
+        for (int i = 0; i < 10; i++) { bxRow[i] = x0; firstInRow[i] = true; }
         for (int g = 0; g < gCount; g++) {
             if (gNat[g] <= 0) {
                 for (int i = gStart[g]; i <= gEnd[g]; i++) out[i] = dead;
@@ -1220,6 +1253,7 @@ struct App {
                 if (DeckHidden(i)) { out[i] = dead; continue; }
                 out[i] = D2D1::RectF(bx, y, bx + nat[i], y + rowH);
                 bx += nat[i] + (i < gEnd[g] ? gap : 0);
+                if (i == DK_MORPHT) bx += MORPH_EXTRA;   // reserve the slider + value-label gap
             }
             bxRow[rr] = bx;
         }
@@ -1235,6 +1269,27 @@ struct App {
         // The full-width bar rect (web: bg-scope/85 with a white/10 top
         // hairline, hugging the bottom edge).
         return D2D1::RectF(0, yTop - bottom, W, H);
+    }
+
+    // The morph slider's track + value-label rects live in the reserved gap
+    // between the two morph buttons (see DeckLayout / MORPH_EXTRA). Valid only
+    // while the morph group is visible (projectM engine); callers guard first.
+    void MorphSliderRects(const D2D1_RECT_F b[DK_N], D2D1_RECT_F& track, D2D1_RECT_F& label) const {
+        const float gap = 6;
+        float tl = b[DK_MORPHT].right + gap, tr = tl + MORPH_TRACK_W;
+        track = D2D1::RectF(tl, b[DK_MORPHT].top, tr, b[DK_MORPHT].bottom);
+        label = D2D1::RectF(tr + 6, b[DK_MORPHT].top, tr + 6 + MORPH_VALUE_W, b[DK_MORPHT].bottom);
+    }
+    // Map an x within the track to a 0.5–10 s length, quantized to 0.5 s (web
+    // slider step). Out-of-track x clamps to the ends.
+    float MorphSecFromX(float mx, const D2D1_RECT_F& track) const {
+        float w = track.right - track.left;
+        float frac = w > 0 ? (mx - track.left) / w : 0.0f;
+        if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+        float sec = 0.5f + frac * (10.0f - 0.5f);
+        sec = (float)((int)(sec / 0.5f + 0.5f)) * 0.5f;   // snap to 0.5 s
+        if (sec < 0.5f) sec = 0.5f; if (sec > 10.0f) sec = 10.0f;
+        return sec;
     }
 
     // Hit tests take LOGICAL coords (WndProc divides mouse pixels by UiScale).
@@ -1267,7 +1322,7 @@ struct App {
         case DK_REC:   return rec.Active();
         case DK_FULL:  return fullscreen;
         case DK_HELP:  return help;
-        case DK_PICK: case DK_TRACE: case DK_SHUF: case DK_RES: case DK_DISP:
+        case DK_PICK: case DK_TRACE: case DK_SHUF: case DK_RES: case DK_DISP: case DK_MORPHT:
             return deckMenu == i;   // highlight whichever dropdown is open
         default:       return false;
         }
@@ -1287,8 +1342,9 @@ struct App {
         case DK_GPU:   if (pmActive) ToggleProjectM(); if (!shaderActive) ToggleShader(); OpenMenu(DK_PICK); break;
         case DK_PROJM: EnterProjectM(false); OpenMenu(DK_PICK); break;
         case DK_MILK:  EnterProjectM(true);  OpenMenu(DK_PICK); break;
-        case DK_PICK: case DK_TRACE: case DK_SHUF: case DK_RES: case DK_DISP:
+        case DK_PICK: case DK_TRACE: case DK_SHUF: case DK_RES: case DK_DISP: case DK_MORPHT:
                        if (prev == i) deckMenu = -1; else OpenMenu(i); break;   // toggle this dropdown
+        case DK_MORPH: MorphNow(); break;
         case DK_CALM:  SetCalm(!calm); break;
         case DK_PALS:  OpenPalettePanel(); break;
         case DK_REC:   ToggleRecord(); break;
@@ -1336,6 +1392,26 @@ struct App {
         if (pmActive) pmHost.NextPreset(dir);
         else if (shaderActive) { int n = shaderHost.ShaderCount(); if (n) shaderIdx = (shaderIdx + dir + n) % n; }
         else CycleMode(dir);
+    }
+
+    // The morph button: cross-fade from the playing preset to the target over
+    // the slider length. Shuffle target (empty name) picks a random OTHER
+    // preset; a named target is resolved against the live library each time, so
+    // one that is current or no longer present is a no-op (web parity).
+    void MorphNow() {
+        if (!pmActive || !pmHost.ready) return;
+        int n = pmHost.PresetCount();
+        if (n <= 0) return;
+        if (morphTargetName.empty()) {
+            if (n < 2) return;
+            int cur = pmHost.PresetIndex(), t;
+            do { t = rand() % n; } while (t == cur);
+            pmHost.MorphToPreset(t, morphSec);
+            return;
+        }
+        int t = pmHost.PresetIndexByName(morphTargetName.c_str());
+        if (t < 0 || t == pmHost.PresetIndex()) return;
+        pmHost.MorphToPreset(t, morphSec);
     }
 
     // MILK's library folder: the user's picked archive, else the bundled
@@ -1389,6 +1465,7 @@ struct App {
         case DK_SHUF:  return SHUFFLE_COUNT;
         case DK_RES:   return RES_COUNT;
         case DK_DISP:  return DisplayCount() + 1;   // + ALL DISPLAYS toggle
+        case DK_MORPHT: return 1 + (pmActive ? pmHost.PresetCount() : 0);   // shuffle + presets
         }
         return 0;
     }
@@ -1399,6 +1476,7 @@ struct App {
         case DK_TRACE: return PalNameFor(i);
         case DK_SHUF:  return SHUF_LABELS[i];
         case DK_RES:   return RES_OPTS[i].name;
+        case DK_MORPHT: return i == 0 ? L"shuffle" : pmHost.PresetNameAt(i - 1);
         case DK_DISP:
             if (i >= DisplayCount())
                 return g_companionsOpen ? L"CLOSE EXTRA DISPLAYS" : L"ALL DISPLAYS";
@@ -1413,6 +1491,11 @@ struct App {
         case DK_SHUF:  return shuffleIdx;
         case DK_RES:   return resIdx;
         case DK_DISP:  return displayIdx;
+        case DK_MORPHT: {
+            if (morphTargetName.empty()) return 0;   // shuffle
+            int t = pmActive ? pmHost.PresetIndexByName(morphTargetName.c_str()) : -1;
+            return t >= 0 ? t + 1 : 0;   // a gone target reads as shuffle
+        }
         }
         return -1;
     }
@@ -1430,6 +1513,10 @@ struct App {
         case DK_TRACE: paletteIdx = i; break;
         case DK_SHUF:  SetShuffle(i); break;
         case DK_RES:   resIdx = i; break;
+        case DK_MORPHT:
+            if (i == 0) morphTargetName.clear();               // shuffle
+            else morphTargetName = pmHost.PresetNameAt(i - 1);
+            break;
         case DK_DISP:
             if (i >= DisplayCount()) {
                 if (g_companionsOpen) CloseCompanions(); else OpenCompanions(inst);
@@ -1606,6 +1693,21 @@ struct App {
         float sc = UiScale();
         int mx = (int)(pxx / sc), my = (int)(pxy / sc);
         hudActivity = Now();   // any movement wakes the HUD (then it fades on idle)
+        // Dragging the morph slider tracks the thumb; self-heal a drag whose
+        // button was released off-window (no WM_LBUTTONUP would have arrived).
+        if (morphDragging) {
+            if (!(GetKeyState(VK_LBUTTON) & 0x8000)) { morphDragging = false; SaveConfig(); }
+            else {
+                if (pmActive && rt && !DeckHidden(DK_MORPHT)) {
+                    D2D1_SIZE_F sz = rt->GetSize();
+                    D2D1_RECT_F b[DK_N]; DeckLayout(sz.width / sc, sz.height / sc, b);
+                    D2D1_RECT_F track, label; MorphSliderRects(b, track, label);
+                    morphSec = MorphSecFromX((float)mx, track);
+                }
+                deckVisible = true; deckActivity = Now();
+                return;
+            }
+        }
         if (palPanel) return;  // panel is modal
         RECT rc; GetClientRect(hwnd, &rc);
         int hit = DeckHitTest(mx, my);
@@ -1619,6 +1721,20 @@ struct App {
         if (PanelClick(mx, my)) return;
         if (MenuClick(mx, my)) { deckActivity = Now(); return; }
         if (!deckVisible) return;
+        // Morph slider: press-and-drag to set the blend length. It sits in the
+        // gap between the morph buttons, which DeckHitTest reports as no button.
+        if (pmActive && rt && !DeckHidden(DK_MORPHT)) {
+            D2D1_SIZE_F sz = rt->GetSize();
+            D2D1_RECT_F b[DK_N]; DeckLayout(sz.width / sc, sz.height / sc, b);
+            D2D1_RECT_F track, label; MorphSliderRects(b, track, label);
+            if (mx >= track.left - 4 && mx <= track.right + 4 &&
+                my >= track.top && my <= track.bottom) {
+                morphDragging = true;
+                morphSec = MorphSecFromX((float)mx, track);
+                deckActivity = Now();
+                return;
+            }
+        }
         int hit = DeckHitTest(mx, my);
         if (hit >= 0) { DeckDispatch(hit); deckActivity = Now(); }
     }
@@ -1695,6 +1811,21 @@ struct App {
                 float dw = DescWidth(i);
                 p.Text(b[i].left - dw, b[i].top, dw - 6, h, d, 1, 1, 1, 0.40f, true, true);
             }
+        }
+        // Morph slider: rail + thumb in the reserved gap between the two morph
+        // buttons, value label beside it — the deck's one slider, styled to sit
+        // with the button chrome (soft-blue thumb, white/25 rail).
+        if (pmActive && !DeckHidden(DK_MORPHT)) {
+            D2D1_RECT_F track, label; MorphSliderRects(b, track, label);
+            float tw = track.right - track.left, th = track.bottom - track.top;
+            float cy = track.top + th * 0.5f;
+            p.Rect(track.left, cy - 1.5f, tw, 3, 1, 1, 1, 0.25f);                    // rail
+            float frac = (morphSec - 0.5f) / (10.0f - 0.5f);
+            if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+            float tx = track.left + frac * tw;
+            p.Rect(tx - 3, track.top + 4, 6, th - 8, UI_SOFT_R, UI_SOFT_G, UI_SOFT_B, 0.95f);  // thumb
+            wchar_t vb[16]; swprintf_s(vb, L"%.1fs", morphSec);
+            p.Text(label.left, label.top, label.right - label.left, th, vb, 1, 1, 1, 0.55f, true);
         }
     }
 
@@ -2147,6 +2278,7 @@ struct App {
         };
         wi(L"mode", modeIdx); wi(L"palette", paletteIdx); wi(L"resolution", resIdx);
         wi(L"shuffle", shuffleIdx); wi(L"calm", calm ? 1 : 0); wi(L"shader", shaderIdx);
+        wi(L"morphSec", (int)(morphSec * 10 + 0.5f));   // blend length in tenths of a second
         wi(L"shufflePal", shufflePalettes ? 1 : 0);
         wi(L"engine", pmActive ? (milkMode ? 3 : 2) : (shaderActive ? 1 : 0));
         wi(L"spout", spout.on ? 1 : 0);
@@ -2220,6 +2352,7 @@ struct App {
         paletteIdx = Clampi(GetPrivateProfileIntW(L"settings", L"palette", 0, path.c_str()), 0, PaletteCount() - 1);
         resIdx = Clampi(GetPrivateProfileIntW(L"settings", L"resolution", 0, path.c_str()), 0, RES_COUNT - 1);
         shuffleIdx = Clampi(GetPrivateProfileIntW(L"settings", L"shuffle", 0, path.c_str()), 0, SHUFFLE_COUNT - 1);
+        morphSec = Clampi(GetPrivateProfileIntW(L"settings", L"morphSec", 27, path.c_str()), 5, 100) / 10.0f;
         calm = GetPrivateProfileIntW(L"settings", L"calm", 0, path.c_str()) != 0;
         shaderIdx = Clampi(GetPrivateProfileIntW(L"settings", L"shader", 0, path.c_str()), 0, SV_COUNT - 1);
         shufflePalettes = GetPrivateProfileIntW(L"settings", L"shufflePal", 0, path.c_str()) != 0;
@@ -2377,6 +2510,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONDOWN:
         a->OnClick((short)LOWORD(lp), (short)HIWORD(lp));
+        return 0;
+    case WM_LBUTTONUP:
+        // End a morph-slider drag and persist the length once (not per move).
+        if (a->morphDragging) { a->morphDragging = false; a->SaveConfig(); }
         return 0;
     case WM_KEYDOWN:
         // While the palette-name field has focus, letters belong to the name
