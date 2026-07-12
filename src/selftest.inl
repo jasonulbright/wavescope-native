@@ -476,6 +476,30 @@ static int RunSelfTest(App* v) {
         v->ToggleProjectM();
     }
 
+    // --- auto-VJ detector (drop -> hop) ---
+    // Drive the VJ detector on a synthetic clock with a controlled bass
+    // envelope: a quiet-but-present baseline must hold (no drop), then a spike
+    // past the 8 s hold must fire a drop that hops the preset.
+    v->ToggleProjectM();
+    if (v->pmActive && v->pmHost.ready) {
+        v->EnterProjectM(false);
+        for (int i = 0; i < 10; i++) { pump(); v->Render(); }
+        v->ArmVj();
+        AudioFrame f{};
+        float t = 100.0f;
+        int startIdx = v->pmHost.PresetIndex();
+        for (int i = 0; i < 90; i++) { f.bass = 0.05f; v->VjTick(f, t); t += 0.15f; }  // ~13 s quiet
+        int quietIdx = v->pmHost.PresetIndex();
+        for (int i = 0; i < 8; i++)  { f.bass = 0.60f; v->VjTick(f, t); t += 0.15f; }  // spike -> drop
+        int dropIdx = v->pmHost.PresetIndex();
+        bool pass = (quietIdx == startIdx) && (dropIdx != quietIdx);
+        out(L"vj: quiet-hold=%d drop-hop=%d idx %d/%d/%d -> %s",
+            quietIdx == startIdx ? 1 : 0, dropIdx != quietIdx ? 1 : 0,
+            startIdx, quietIdx, dropIdx, pass ? L"PASS" : L"FAIL");
+        if (!pass) rc = 1;
+        v->ToggleProjectM();
+    }
+
     out(L"selftest: %s", rc == 0 ? L"ALL PASS" : L"FAILURES (see above)");
     if (log) fclose(log);
     return rc;
