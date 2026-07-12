@@ -478,10 +478,12 @@ private:
 // --------------------------------------------------------------------- app
 
 // Shuffle timer choices, in seconds; 0 = off. NEGATIVE = auto-DJ: the tick
-// hops the ENGINE too (random engine + random visual), web-style.
-static const int SHUFFLE_SECS[] = { 0, 15, 30, 60, 300, -30 };
+// hops the ENGINE too (random engine + random visual), web-style. VJ_SEC is
+// the audio-driven VJ (no timer): a bass drop hard-cuts, a lull gently morphs.
+static const int VJ_SEC = -1;
+static const int SHUFFLE_SECS[] = { 0, 15, 30, 60, 300, -30, VJ_SEC };
 static const int SHUFFLE_COUNT = (int)(sizeof(SHUFFLE_SECS) / sizeof(SHUFFLE_SECS[0]));
-static const wchar_t* SHUF_LABELS[] = { L"OFF", L"15s", L"30s", L"1m", L"5m", L"DJ" };
+static const wchar_t* SHUF_LABELS[] = { L"OFF", L"15s", L"30s", L"1m", L"5m", L"DJ", L"VJ" };
 
 // Render-resolution targets (backing-store height); 0 = auto (window size).
 struct ResOpt { const wchar_t* name; int height; };
@@ -585,6 +587,14 @@ struct App {
     bool calm = false;
     int shuffleIdx = 0;      // index into SHUFFLE_SECS
     float lastShuffle = 0;
+    // Auto-VJ (SHUFFLE "VJ"): audio-driven switching. Bass feeds a fast and a
+    // slow envelope (seeded at arm); a fast spike over the slow floor is a drop
+    // (hard cut), a long lull is a gentle morph. State advances on a 150 ms
+    // cadence so the web's constants port regardless of frame rate.
+    float vjSlow = 0, vjFast = 0;
+    bool vjSeeded = false;
+    float vjLastSwitch = 0;   // Now() baseline for the held-time checks
+    float vjLastTick = 0;     // Now() of the last 150 ms envelope step
     // Morph deck (projectM engine): blend length (persisted) and target. The
     // target is a preset name, empty = shuffle (a random other preset); a name
     // is resolved against the live library each morph, so a gone/renamed target
@@ -908,14 +918,18 @@ struct App {
         // Shuffle timer: hop to a random other visual (or preset) on interval.
         // DJ (negative interval) hops the engine as well.
         int shufSecs = SHUFFLE_SECS[shuffleIdx];
-        int interval = shufSecs < 0 ? -shufSecs : shufSecs;
-        if (interval > 0 && now - lastShuffle >= (float)interval) {
-            lastShuffle = now;
-            if (shufSecs < 0) DjHop();
-            else if (pmActive) pmHost.NextPreset(1);
-            else if (shaderActive) shaderIdx = (shaderIdx + 1) % shaderHost.ShaderCount();
-            else modeIdx = PickRandomMode();
-            if (shufflePalettes) paletteIdx = PickRandomIncludedPalette();
+        if (shufSecs == VJ_SEC) {
+            VjTick(frame, now);   // audio-driven; no timer
+        } else {
+            int interval = shufSecs < 0 ? -shufSecs : shufSecs;
+            if (interval > 0 && now - lastShuffle >= (float)interval) {
+                lastShuffle = now;
+                if (shufSecs < 0) DjHop();
+                else if (pmActive) pmHost.NextPreset(1);
+                else if (shaderActive) shaderIdx = (shaderIdx + 1) % shaderHost.ShaderCount();
+                else modeIdx = PickRandomMode();
+                if (shufflePalettes) paletteIdx = PickRandomIncludedPalette();
+            }
         }
 
         if (calm) frame.beat *= 0.2f; // photosensitivity: tame the pulse
@@ -1872,7 +1886,7 @@ struct App {
             L"R              record clip -> wavescope-<time>.mp4 (H.264+AAC)\n"
             L"O              Spout output (OBS ingests \"WaveScope\")\n"
             L"B              Spotify: authorize + start playback (Premium)\n"
-            L"S              shuffle timer (off / 15s / 30s / 1m / 5m / DJ)\n"
+            L"S              shuffle timer (off / 15s / 30s / 1m / 5m / DJ / VJ)\n"
             L"C              calm mode (photosensitive-safe)\n"
             L"L              preset lab (edit the active .milk)   RES \x25BE on deck\n"
             L"F              fullscreen        H   HUD (auto-fades on idle)\n"
@@ -2042,8 +2056,48 @@ struct App {
         if (calm && MODES[modeIdx].flash) CycleMode(1);
     }
 
-    void CycleShuffle() { shuffleIdx = (shuffleIdx + 1) % SHUFFLE_COUNT; lastShuffle = Now(); }
-    void SetShuffle(int i) { shuffleIdx = Clampi(i, 0, SHUFFLE_COUNT - 1); lastShuffle = Now(); }
+    void CycleShuffle() { shuffleIdx = (shuffleIdx + 1) % SHUFFLE_COUNT; lastShuffle = Now(); ArmVj(); }
+    void SetShuffle(int i) { shuffleIdx = Clampi(i, 0, SHUFFLE_COUNT - 1); lastShuffle = Now(); ArmVj(); }
+
+    // (Re)arm the VJ detector: re-seed the envelopes on the next tick and reset
+    // the cadence. Cheap to call whenever the shuffle option changes.
+    void ArmVj() { vjSeeded = false; vjLastTick = 0; }
+
+    // Auto-VJ tick (web parity). Bass feeds a fast (~0.5 s) and a slow (~10 s)
+    // envelope; a fast spike over the slow floor after the 8 s hold is a drop
+    // (hard cut); 45 s with no drop is a gentle 5 s morph. Runs on a 150 ms
+    // cadence, so the ported constants match the web at any frame rate.
+    void VjTick(const AudioFrame& frame, float now) {
+        if (now - vjLastTick < 0.15f) return;
+        vjLastTick = now;
+        float bass = frame.bass;
+        if (!vjSeeded) { vjSlow = vjFast = bass; vjSeeded = true; vjLastSwitch = now; return; }
+        vjSlow = vjSlow * 0.985f + bass * 0.015f;
+        vjFast = vjFast * 0.6f + bass * 0.4f;
+        float held = now - vjLastSwitch;
+        if (held < 8.0f) return;                           // 8 s minimum hold
+        if (vjSlow > 0.04f && vjFast > vjSlow * 1.5f && vjFast > 0.18f) {
+            VjHop(0.0f); vjLastSwitch = now; return;       // drop: hard cut
+        }
+        if (held > 45.0f) { VjHop(5.0f); vjLastSwitch = now; }   // lull: gentle morph
+    }
+    // Switch the active engine's visual for a VJ hop. blendSec 0 = hard cut
+    // (drop); 5 = a gentle morph (only projectM blends; others just switch).
+    void VjHop(float blendSec) {
+        if (pmActive && pmHost.ready) {
+            int n = pmHost.PresetCount();
+            if (n < 2) return;
+            int cur = pmHost.PresetIndex(), t;
+            do { t = rand() % n; } while (t == cur);
+            if (blendSec > 0) pmHost.MorphToPreset(t, (double)blendSec);
+            else pmHost.LoadPreset(t, false);
+        } else if (shaderActive) {
+            int n = shaderHost.ShaderCount();
+            if (n > 1) { int c = shaderIdx, t; do { t = rand() % n; } while (t == c); shaderIdx = t; }
+        } else {
+            modeIdx = PickRandomMode();
+        }
+    }
 
     // ----- palettes (built-in + user-created) -----
 
