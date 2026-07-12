@@ -258,10 +258,11 @@ struct ProjectMHost {
     // switch. A hard swap renders the new preset directly and avoids it.
     void NextPreset(int dir) { if (ready) LoadPreset(presetIdx + dir, false); }
 
-    // Repoint at a folder of presets (the user's .milk archive).
+    // Repoint at a folder of presets (the user's .milk archive). Hard cut,
+    // same as NextPreset — the soft cut white-flashes (see above).
     void SetPresetFolder(const wchar_t* folder) {
         ScanPresets(folder);
-        if (!presetPaths.empty()) LoadPreset(PreferredStart(), true);
+        if (!presetPaths.empty()) LoadPreset(PreferredStart(), false);
     }
 
     const wchar_t* PresetName() const { return curName.c_str(); }
