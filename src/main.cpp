@@ -55,8 +55,8 @@ template <typename T> static void SafeRelease(T** p) {
     if (*p) { (*p)->Release(); *p = nullptr; }
 }
 
-// The pure analysis math (AudioFrame, Hsla, BinLog, FFT, AnalyzeWindow),
-// matching the web app's analyser contract.
+// The pure analysis math (AudioFrame, Hsla, BinLog, FFT, AnalyzeWindow) —
+// shared with tests.cpp, which asserts it against the web contract.
 #include "analysis.inl"
 
 // ------------------------------------------------------------------- audio
@@ -154,7 +154,8 @@ public:
             }
             ReleaseSRWLockShared(&m_lock);
         }
-        // The Web-Audio-analyser-matched math lives in analysis.inl.
+        // The Web-Audio-analyser-matched math lives in analysis.inl
+        // (tests.cpp asserts it against the contract).
         AnalyzeWindow(m_an, window, (float)(m_sampleRate ? m_sampleRate : 48000), now, f);
     }
 
@@ -509,6 +510,9 @@ static bool g_companionsOpen = false;
 static void OpenCompanions(HINSTANCE inst);
 static void CloseCompanions();
 
+// Selftest drives the app through transient states (engines, Spout on/off);
+// none of that may leak into the user's wavescope.ini.
+static bool g_noPersist = false;
 
 struct App {
     HWND hwnd = nullptr;
@@ -846,6 +850,13 @@ struct App {
     float UiScale() const {
         UINT dpi = GetDpiForWindow(hwnd);
         return dpi ? (float)dpi / 96.0f : 1.0f;
+    }
+
+    // Single-window path (selftest): analyze here, then render.
+    void Render() {
+        AudioFrame frame;
+        g_tap.Analyze(frame, Now());
+        RenderFrame(frame);
     }
 
     // Render one frame from the shared analysis (by value: calm mode tames
@@ -2001,7 +2012,7 @@ struct App {
     std::wstring ConfigPath() const { return PmExeDir() + L"wavescope.ini"; }
 
     void SaveConfig() {
-        if (isCompanion) return;   // only the primary window's setup persists
+        if (isCompanion || g_noPersist) return; // primary window only, never selftest
         std::wstring path = ConfigPath();
         AcquireSRWLockExclusive(&g_iniLock);   // vs. the Spotify worker's SaveToken
         auto wi = [&](const wchar_t* k, int v) {
@@ -2126,6 +2137,10 @@ struct App {
         SafeRelease(&d2d);
     }
 };
+
+// Self-test harness (WaveScope.exe selftest): drives every engine on the demo
+// signal, dumps PNGs of what rendered, writes wavescope-selftest.log.
+#include "selftest.inl"
 
 // One App per display, heap-allocated so the pointers stashed in each window
 // (GWLP_USERDATA) stay valid regardless of vector growth.
@@ -2427,7 +2442,8 @@ static void CloseCompanions() {
 // CommandLineToArgvW as usual).
 struct LaunchOpts {
     bool demo = false, milkdrop = false, shader = false, wall = false,
-         kiosk = false, installStartup = false, removeStartup = false;
+         kiosk = false, installStartup = false, removeStartup = false,
+         selftest = false;
     std::wstring file;
 };
 
@@ -2445,6 +2461,7 @@ static LaunchOpts ParseCmdLine() {
         else if (t == L"kiosk")           o.kiosk = true;
         else if (t == L"install-startup") o.installStartup = true;
         else if (t == L"remove-startup")  o.removeStartup = true;
+        else if (t == L"selftest")        o.selftest = true;
         else if (t.rfind(L"file=", 0) == 0) o.file = t.substr(5);
     }
     LocalFree(argv);
@@ -2458,6 +2475,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); // UI-thread shell dialogs
 
     LaunchOpts opts = ParseCmdLine();
+    g_noPersist = opts.selftest;       // a test run must not rewrite the config
     srand((unsigned)GetTickCount64()); // shuffle must differ across launches
 
     // Explicit launch-at-login toggles (user runs these deliberately).
@@ -2502,7 +2520,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         if (opts.shader) v->ToggleShader();
     }
     // No engine flag given: restore the persisted engine on the primary view.
-    if (!opts.milkdrop && !opts.shader && !g_views.empty()) {
+    if (!opts.milkdrop && !opts.shader && !opts.selftest && !g_views.empty()) {
         App* v = g_views[0];
         switch (v->savedEngine) {
         case 1: v->ToggleShader(); break;
@@ -2510,6 +2528,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         case 3: v->EnterProjectM(true); break;
         }
         if (v->savedSpout) v->ToggleSpout();
+    }
+
+    if (opts.selftest) {
+        int rc = RunSelfTest(g_views[0]);
+        TrayRemove();
+        for (App* v : g_views) { v->Shutdown(); delete v; }
+        g_views.clear();
+        return rc;
     }
 
     // Render loop. Analysis runs ONCE per iteration on the shared tap; every
