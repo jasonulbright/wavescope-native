@@ -351,6 +351,97 @@ static int RunSelfTest(App* v) {
         v->ToggleProjectM();
     }
 
+    // --- morph transition (deliberate soft cut) ---
+    // The deck's morph button, VJ lulls and timed shuffle blend presets with
+    // projectM's soft cut. Native shipped hard cuts everywhere because that
+    // cross-fade historically flashed white on switch; this drives the real
+    // morph across a spread of preset pairs and durations in BOTH libraries
+    // (bundled + the 551 classics, where the diverse init states most likely
+    // provoke a flash), asserts it renders, and logs the peak near-white pixel
+    // share right after each switch so any flash shows up in the log (it would
+    // spike far past both endpoints).
+    v->ToggleProjectM();
+    if (!v->pmActive || !v->pmHost.ready) {
+        out(L"morph: engine failed to start -> FAIL"); rc = 1;
+    } else {
+        // Mean luminance (0..255) and near-white pixel share (all channels
+        // > 235) of a BGRA readback — a white flash pushes both toward the top.
+        auto stats = [](const uint8_t* bgra, size_t bytes, float& meanLum, float& nearWhite) {
+            size_t px = bytes / 4; double sum = 0; size_t white = 0;
+            for (size_t i = 0; i + 3 < bytes; i += 4) {
+                int b = bgra[i], g = bgra[i + 1], r = bgra[i + 2];
+                sum += (r + g + b) / 3.0;
+                if (r > 235 && g > 235 && b > 235) white++;
+            }
+            meanLum = px ? (float)(sum / (double)px) : 0.0f;
+            nearWhite = px ? 100.0f * (float)white / (float)px : 0.0f;
+        };
+        // Hard-cut to `idx`, let its phosphor trails settle, and report the
+        // settled near-white share (the endpoint baseline to compare against).
+        auto settleWhite = [&](int idx) {
+            v->pmHost.LoadPreset(idx, false);
+            for (int i = 0; i < 30; i++) { pump(); v->Render(); }
+            float pcm[4800]; int nn = g_tap.ReadNew(v->pmCursor, pcm, 4800);
+            v->pmHost.RenderEngine(pcm, nn);
+            std::vector<uint8_t> px; int w = 0, h = 0; float ml = 0, nw = 0;
+            if (v->pmHost.ReadBack(px, w, h)) stats(px.data(), px.size(), ml, nw);
+            return nw;
+        };
+        bool morphRendered = false;
+        float worstFlash = 0;   // peak (transition nearWhite - endpoint nearWhite)
+        // Sweep the current library: a spread of preset pairs, each morphed at
+        // three durations; log per-run flash and track the worst.
+        auto sweep = [&](const wchar_t* lib) {
+            int n = v->pmHost.PresetCount();
+            if (n < 2) { out(L"morph[%s]: <2 presets, skipped", lib); return; }
+            const double durs[] = { 0.5, 3.0 };   // short + typical cross-fade
+            int pairs[2][2] = { { 0, n / 2 }, { n / 3, n - 1 } };
+            for (auto& pr : pairs) {
+                int a = ((pr[0] % n) + n) % n, b = ((pr[1] % n) + n) % n;
+                if (a == b) continue;
+                float baseW = settleWhite(a), wb = settleWhite(b);
+                if (wb > baseW) baseW = wb;   // flash vs the brighter endpoint
+                for (double dur : durs) {
+                    settleWhite(a);   // start each run settled on A
+                    v->pmHost.MorphToPreset(b, dur);
+                    // Sample the frames right after the switch — where the
+                    // historic flash lived (incoming preset blended pre-init).
+                    float peakW = 0, peakLum = 0; int peakFrame = -1;
+                    for (int i = 0; i < 40; i++) {
+                        pump();
+                        float pcm[4800]; int nn = g_tap.ReadNew(v->pmCursor, pcm, 4800);
+                        v->pmHost.RenderEngine(pcm, nn);
+                        std::vector<uint8_t> px; int w = 0, h = 0;
+                        if (v->pmHost.ReadBack(px, w, h)) {
+                            float ml = 0, nw = 0; stats(px.data(), px.size(), ml, nw);
+                            if (nw > peakW) { peakW = nw; peakFrame = i; }
+                            if (ml > peakLum) peakLum = ml;
+                            if (ml > 2.0f) morphRendered = true;
+                        }
+                    }
+                    float flash = peakW - baseW;
+                    if (flash > worstFlash) worstFlash = flash;
+                    out(L"morph[%s]: %s -> %s dur=%.1fs endWhite=%.1f%% peakWhite=%.1f%%@f%d peakLum=%.0f flash=%.1f%%",
+                        lib, v->pmHost.PresetNameAt(a), v->pmHost.PresetNameAt(b),
+                        dur, baseW, peakW, peakFrame, peakLum, flash);
+                }
+            }
+        };
+        v->EnterProjectM(false); sweep(L"projm");   // bundled WaveScope presets
+        v->EnterProjectM(true);  sweep(L"milk");     // the 551 classics
+        v->EnterProjectM(false);
+        // The morph must render a real transition, and the soft cut must stay
+        // flash-free: measured peak near-white share sits near 0 (endpoints'
+        // own brightness aside), so a generous 25% ceiling is a regression
+        // tripwire — if a projectM update reintroduces the pre-init white
+        // flash, this goes red and the app-level dissolve is back on the table.
+        bool pass = morphRendered && worstFlash < 25.0f;
+        out(L"morph: rendered=%d worstFlash=%.1f%% -> %s",
+            morphRendered ? 1 : 0, worstFlash, pass ? L"PASS" : L"FAIL");
+        if (!pass) rc = 1;
+        v->ToggleProjectM();
+    }
+
     out(L"selftest: %s", rc == 0 ? L"ALL PASS" : L"FAILURES (see above)");
     if (log) fclose(log);
     return rc;
