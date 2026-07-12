@@ -68,6 +68,8 @@ struct ProjectMHost {
     int presetIdx = 0;
     bool ready = false;
     int lost = 0;             // consecutive wglMakeCurrent failures (GPU reset)
+    bool loadFailed = false;  // set by the preset-switch-failed callback below
+    std::string loadFailMsg;  // engine's rejection text (no line number)
     GLuint overlayTex = 0;    // UI overlay uploaded from the D2D-rendered bitmap
     int overlayW = 0, overlayH = 0;
     int cw = 1, ch = 1;       // child client size, for the HUD ortho
@@ -159,6 +161,10 @@ struct ProjectMHost {
 
         pm = projectm_create_with_opengl_load_proc(ProjectMGlLoad, nullptr);
         if (!pm) { Destroy(); return false; }
+        // The preset lab needs to know when an edited preset is rejected; the
+        // engine reports parse/compile failures through this callback (and
+        // keeps the running preset). It fires synchronously inside the load.
+        projectm_set_preset_switch_failed_event_callback(pm, OnPresetFailed, this);
         // Shared MilkDrop textures (textures\ beside the exe): the classic
         // presets reference them by name; without the search path they render
         // with plain fallbacks.
@@ -270,6 +276,48 @@ struct ProjectMHost {
         if (seconds < 0.1) seconds = 0.1;
         projectm_set_soft_cut_duration(pm, seconds);
         LoadPreset(idx, true);   // smooth = true: projectM cross-fades in
+    }
+
+    // The switch-failed callback: a rejected preset (bad eel / parse error)
+    // lands here. projectM keeps rendering the previous preset — exactly what
+    // the lab wants when an edit doesn't compile.
+    static void OnPresetFailed(const char* /*filename*/, const char* message, void* user) {
+        ProjectMHost* h = (ProjectMHost*)user;
+        h->loadFailed = true;
+        h->loadFailMsg = message ? message : "";
+    }
+
+    // Apply raw preset source (the lab's edited .milk text, UTF-8) as a hard
+    // cut. Returns false if the engine rejected it — the previous preset stays
+    // up and loadFailMsg carries the reason (no line number; projectM doesn't
+    // report one). The failed callback fires synchronously within the load.
+    bool ApplyData(const char* utf8, bool smooth) {
+        if (!ready || !pm || !utf8) return false;
+        wglMakeCurrent(dc, glrc);
+        loadFailed = false; loadFailMsg.clear();
+        projectm_load_preset_data(pm, utf8, smooth);
+        return !loadFailed;
+    }
+
+    // Full source text of the current preset (its UTF-8 .milk file decoded to
+    // UTF-16), to seed the lab editor. Empty if there's nothing to read.
+    std::wstring CurrentPresetText() const {
+        if (presetPaths.empty()) return L"";
+        FILE* fp = _wfopen(presetPaths[presetIdx].c_str(), L"rb");
+        if (!fp) return L"";
+        fseek(fp, 0, SEEK_END); long len = ftell(fp); fseek(fp, 0, SEEK_SET);
+        std::wstring out;
+        if (len > 0 && len < (1 << 20)) {
+            std::string buf; buf.resize((size_t)len);
+            size_t rd = fread(&buf[0], 1, (size_t)len, fp); buf.resize(rd);
+            int wn = MultiByteToWideChar(CP_UTF8, 0, buf.data(), (int)buf.size(), nullptr, 0);
+            if (wn > 0) {
+                out.resize((size_t)wn);
+                MultiByteToWideChar(CP_UTF8, 0, buf.data(), (int)buf.size(), &out[0], wn);
+            }
+        }
+        fclose(fp);
+        return out;
     }
 
     // Repoint at a folder of presets (the user's .milk archive). Hard cut,
