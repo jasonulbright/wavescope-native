@@ -258,6 +258,20 @@ struct ProjectMHost {
     // switch. A hard swap renders the new preset directly and avoids it.
     void NextPreset(int dir) { if (ready) LoadPreset(presetIdx + dir, false); }
 
+    // Deliberate morph: cross-fade from the playing preset to preset `idx`
+    // over `seconds`, letting projectM blend both presets' state (a true
+    // parameter morph, not just a dissolve). Scoped to the deliberate morph
+    // paths (the deck's morph button, VJ lulls, timed shuffle hops); the
+    // picker/dropdown/prev-next switches stay hard cuts (see NextPreset). The
+    // soft-cut duration is a one-shot: set it per morph so each morph honors
+    // the current length without disturbing anything else.
+    void MorphToPreset(int idx, double seconds) {
+        if (!ready || presetPaths.empty()) return;
+        if (seconds < 0.1) seconds = 0.1;
+        projectm_set_soft_cut_duration(pm, seconds);
+        LoadPreset(idx, true);   // smooth = true: projectM cross-fades in
+    }
+
     // Repoint at a folder of presets (the user's .milk archive). Hard cut,
     // same as NextPreset — the soft cut white-flashes (see above).
     void SetPresetFolder(const wchar_t* folder) {
