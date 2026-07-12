@@ -924,8 +924,8 @@ struct App {
             int interval = shufSecs < 0 ? -shufSecs : shufSecs;
             if (interval > 0 && now - lastShuffle >= (float)interval) {
                 lastShuffle = now;
-                if (shufSecs < 0) DjHop();
-                else if (pmActive) pmHost.NextPreset(1);
+                if (shufSecs < 0) DjHop();                    // DJ: hard engine hops
+                else if (pmActive) MorphShuffle();            // soft cut at the slider length
                 else if (shaderActive) shaderIdx = (shaderIdx + 1) % shaderHost.ShaderCount();
                 else modeIdx = PickRandomMode();
                 if (shufflePalettes) paletteIdx = PickRandomIncludedPalette();
@@ -1432,21 +1432,24 @@ struct App {
         else CycleMode(dir);
     }
 
-    // The morph button: cross-fade from the playing preset to the target over
-    // the slider length. Shuffle target (empty name) picks a random OTHER
-    // preset; a named target is resolved against the live library each time, so
-    // one that is current or no longer present is a no-op (web parity).
-    void MorphNow() {
+    // Morph to a random OTHER preset over the slider length. This is the
+    // shuffle target's action, shared by the morph button and the timed
+    // shuffle so both blend identically instead of hard-cutting.
+    void MorphShuffle() {
         if (!pmActive || !pmHost.ready) return;
         int n = pmHost.PresetCount();
-        if (n <= 0) return;
-        if (morphTargetName.empty()) {
-            if (n < 2) return;
-            int cur = pmHost.PresetIndex(), t;
-            do { t = rand() % n; } while (t == cur);
-            pmHost.MorphToPreset(t, morphSec);
-            return;
-        }
+        if (n < 2) return;
+        int cur = pmHost.PresetIndex(), t;
+        do { t = rand() % n; } while (t == cur);
+        pmHost.MorphToPreset(t, morphSec);
+    }
+
+    // The morph button: cross-fade to the target over the slider length — or a
+    // random other preset while the target is shuffle. A named target that is
+    // current or no longer present is a no-op (web parity).
+    void MorphNow() {
+        if (!pmActive || !pmHost.ready) return;
+        if (morphTargetName.empty()) { MorphShuffle(); return; }
         int t = pmHost.PresetIndexByName(morphTargetName.c_str());
         if (t < 0 || t == pmHost.PresetIndex()) return;
         pmHost.MorphToPreset(t, morphSec);
