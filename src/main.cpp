@@ -593,6 +593,20 @@ struct App {
     float morphSec = 2.7f;
     std::wstring morphTargetName;   // empty = shuffle
     bool morphDragging = false;     // slider thumb is being dragged
+    // Preset lab (projectM engine): a modal editor over the active preset's
+    // full .milk source. Apply hard-cuts the edit; a rejected edit keeps the
+    // running preset up and shows the engine's message. Save As writes the
+    // text into presets\user\ and points the picker at it.
+    bool labPanel = false;
+    std::wstring labText;           // editor buffer (\n-separated source)
+    size_t labCaret = 0;            // caret position (index into labText)
+    int labScroll = 0;              // first visible editor line
+    std::wstring labSeedName;       // preset name the editor was seeded from
+    std::wstring labStatus;         // one-line status under the editor
+    bool labStatusErr = false;      // status is an error (drawn red)
+    std::wstring labSaveName;       // Save As filename field
+    enum { LF_NONE, LF_EDITOR, LF_NAME };
+    int labFocus = LF_NONE;         // which lab field holds keyboard focus
     bool hud = true;         // master enable (H); when on, auto-fades on idle
     float hudActivity = 0;   // last mouse-move time; HUD fades out after it
     bool help = false;       // F1 / ? full keymap overlay
@@ -1095,6 +1109,7 @@ struct App {
            DK_PREV, DK_PICK, DK_NEXT,                    // adaptive mode/preset picker
            DK_WAVE, DK_GPU, DK_PROJM, DK_MILK,           // engines
            DK_TRACE, DK_SHUF, DK_RES,                    // selectors
+           DK_LAB,                                        // preset lab button (projectM only)
            DK_MORPHT, DK_MORPH,                          // morph deck (projectM engine only)
            DK_CALM, DK_PALS, DK_DISP, DK_REC, DK_FULL, DK_HELP, // actions (right cluster)
            DK_N };
@@ -1110,14 +1125,14 @@ struct App {
     static bool DeckGroupEnd(int i) {
         return i == DK_SPOT || i == DK_NEXT || i == DK_MILK ||
                i == DK_TRACE || i == DK_SHUF || i == DK_RES ||
-               i == DK_MORPH || i == DK_HELP;
+               i == DK_LAB || i == DK_MORPH || i == DK_HELP;
     }
     // Buttons that don't apply to the active engine (web parity: trace
     // palettes, calm and the palette panel are built-in-engine concerns; the
     // C/P/N keys still work everywhere).
     bool DeckHidden(int i) {
         bool alt = pmActive || shaderActive;
-        if (i == DK_MORPHT || i == DK_MORPH) return !pmActive;   // morph is projectM-only
+        if (i == DK_MORPHT || i == DK_MORPH || i == DK_LAB) return !pmActive;   // projectM-only
         return alt && (i == DK_TRACE || i == DK_CALM || i == DK_PALS);
     }
     // Tiny dim descriptor drawn before a group's first button (web-style).
@@ -1166,6 +1181,7 @@ struct App {
         case DK_TRACE: return std::wstring(PaletteName()) + CH;
         case DK_SHUF:  return std::wstring(SHUF_LABELS[shuffleIdx]) + CH;
         case DK_RES:   return std::wstring(RES_OPTS[resIdx].name) + CH;
+        case DK_LAB:    return L"lab (L)";
         case DK_MORPHT: return MorphTargetLabel() + CH;
         case DK_MORPH:  return L"morph";
         case DK_CALM:  return L"calm (C)"; case DK_PALS: return L"palettes + shuffle";
@@ -1317,6 +1333,7 @@ struct App {
         case DK_GPU:   return shaderActive;
         case DK_PROJM: return pmActive && !milkMode;
         case DK_MILK:  return pmActive && milkMode;
+        case DK_LAB:   return labPanel;
         case DK_CALM:  return calm;
         case DK_PALS:  return palPanel;
         case DK_REC:   return rec.Active();
@@ -1341,9 +1358,16 @@ struct App {
         case DK_WAVE:  if (pmActive) ToggleProjectM(); if (shaderActive) ToggleShader(); OpenMenu(DK_PICK); break;
         case DK_GPU:   if (pmActive) ToggleProjectM(); if (!shaderActive) ToggleShader(); OpenMenu(DK_PICK); break;
         case DK_PROJM: EnterProjectM(false); OpenMenu(DK_PICK); break;
-        case DK_MILK:  EnterProjectM(true);  OpenMenu(DK_PICK); break;
+        case DK_MILK:
+            // Enter MILK on first click; re-clicking while already in MILK opens
+            // the folder picker to point the library at your own .milk archive
+            // (this was the old L shortcut, now the lab).
+            if (pmActive && milkMode) OpenPresetFolder();
+            else { EnterProjectM(true); OpenMenu(DK_PICK); }
+            break;
         case DK_PICK: case DK_TRACE: case DK_SHUF: case DK_RES: case DK_DISP: case DK_MORPHT:
                        if (prev == i) deckMenu = -1; else OpenMenu(i); break;   // toggle this dropdown
+        case DK_LAB:   OpenLab(); break;
         case DK_MORPH: MorphNow(); break;
         case DK_CALM:  SetCalm(!calm); break;
         case DK_PALS:  OpenPalettePanel(); break;
@@ -1718,6 +1742,7 @@ struct App {
     void OnClick(int pxx, int pxy) {
         float sc = UiScale();
         int mx = (int)(pxx / sc), my = (int)(pxy / sc);
+        if (LabClick(mx, my)) return;
         if (PanelClick(mx, my)) return;
         if (MenuClick(mx, my)) { deckActivity = Now(); return; }
         if (!deckVisible) return;
@@ -1773,6 +1798,7 @@ struct App {
                 pos = nl + 1;
             }
         }
+        if (labPanel) { DrawLabPanel(p); return; }       // modal: hides deck
         if (palPanel) { DrawPalettePanel(p); return; }  // modal: hides deck
         if (deckVisible) DrawDeckP(p);
         if (deckVisible) DrawMenu(p);         // open dropdown sits above its anchor
@@ -1848,7 +1874,7 @@ struct App {
             L"B              Spotify: authorize + start playback (Premium)\n"
             L"S              shuffle timer (off / 15s / 30s / 1m / 5m / DJ)\n"
             L"C              calm mode (photosensitive-safe)\n"
-            L"L              MilkDrop preset folder     RES \x25BE on the deck\n"
+            L"L              preset lab (edit the active .milk)   RES \x25BE on deck\n"
             L"F              fullscreen        H   HUD (auto-fades on idle)\n"
             L"T              always on top     F1 / ?   this help\n"
             L"ESC            close panel / menu / fullscreen, then quit\n"
@@ -2264,6 +2290,295 @@ struct App {
         return true; // swallow clicks while the panel is up
     }
 
+    // ----- preset lab (modal editor over the active preset's .milk source) -----
+
+    static constexpr float LAB_LINE_H = 16.0f;   // editor line height (Consolas 12)
+    static constexpr float LAB_CHAR_W = 6.6f;    // monospace advance at that size
+
+    static std::wstring Utf8ToWide(const std::string& s) {
+        if (s.empty()) return L"";
+        int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+        std::wstring w((size_t)(n > 0 ? n : 0), L'\0');
+        if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
+        return w;
+    }
+    static std::string WideToUtf8(const std::wstring& s) {
+        if (s.empty()) return "";
+        int n = WideCharToMultiByte(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0, nullptr, nullptr);
+        std::string u((size_t)(n > 0 ? n : 0), '\0');
+        if (n > 0) WideCharToMultiByte(CP_UTF8, 0, s.data(), (int)s.size(), &u[0], n, nullptr, nullptr);
+        return u;
+    }
+
+    struct LabRects { D2D1_RECT_F card, close, editor, status, apply, nameBox, save; };
+    void LabLayout(float W, float H, LabRects& r) const {
+        float pw = 680; if (pw > W - 16) pw = W - 16;
+        float ph = H - 24; if (ph > 760) ph = 760;
+        float px = (W - pw) * 0.5f, py = (H - ph) * 0.5f;
+        if (px < 8) px = 8; if (py < 12) py = 12;
+        r.card = D2D1::RectF(px, py, px + pw, py + ph);
+        const float pad = 24;
+        float x = px + pad, right = px + pw - pad, bottom = py + ph - pad;
+        r.close   = D2D1::RectF(right - 52, py + 16, right, py + 40);
+        float saveTop = bottom - 30;
+        r.save    = D2D1::RectF(right - 90, saveTop, right, saveTop + 30);
+        r.nameBox = D2D1::RectF(x, saveTop, r.save.left - 10, saveTop + 30);
+        float applyTop = saveTop - 8 - 30;
+        r.apply   = D2D1::RectF(x, applyTop, x + 90, applyTop + 30);
+        float statusTop = applyTop - 6 - 22;
+        r.status  = D2D1::RectF(x, statusTop, right, statusTop + 22);
+        r.editor  = D2D1::RectF(x, py + 78, right, statusTop - 8);
+    }
+
+    // L / deck button: toggle the lab. Seeds from the active preset on open.
+    void OpenLab() {
+        if (!pmActive || !pmHost.ready) return;   // lab is a projectM feature
+        labPanel = !labPanel;
+        if (labPanel) SeedLab();
+        else labFocus = LF_NONE;
+    }
+    void SeedLab() {
+        labText = pmHost.CurrentPresetText();
+        labSeedName = pmHost.PresetName();
+        labCaret = 0; labScroll = 0;
+        labStatus.clear(); labStatusErr = false;
+        labFocus = LF_EDITOR;
+        std::wstring base = labSeedName;
+        size_t dot = base.rfind(L".milk");
+        if (dot != std::wstring::npos) base.resize(dot);
+        labSaveName = base + L" edit";
+    }
+
+    int LabLineCount() const {
+        int n = 1; for (wchar_t c : labText) if (c == L'\n') n++; return n;
+    }
+    void LabCaretLineCol(int& line, int& col) const {
+        line = 0; col = 0;
+        for (size_t i = 0; i < labCaret && i < labText.size(); i++) {
+            if (labText[i] == L'\n') { line++; col = 0; } else col++;
+        }
+    }
+    size_t LabLineStartIndex(int ln) const {
+        if (ln <= 0) return 0;
+        int cur = 0;
+        for (size_t i = 0; i < labText.size(); i++)
+            if (labText[i] == L'\n' && ++cur == ln) return i + 1;
+        return labText.size();
+    }
+    int LabVisibleLines() const {
+        if (!rt) return 20;
+        float sc = UiScale(); D2D1_SIZE_F sz = rt->GetSize();
+        LabRects r; LabLayout(sz.width / sc, sz.height / sc, r);
+        int v = (int)((r.editor.bottom - r.editor.top - 8) / LAB_LINE_H);
+        return v > 1 ? v : 1;
+    }
+    void LabEnsureVisible() {
+        int line, col; LabCaretLineCol(line, col);
+        int vis = LabVisibleLines();
+        if (line < labScroll) labScroll = line;
+        else if (line >= labScroll + vis) labScroll = line - vis + 1;
+        if (labScroll < 0) labScroll = 0;
+    }
+    void LabInsert(const wchar_t* s) {
+        labText.insert(labCaret, s); labCaret += wcslen(s);
+        labStatus.clear(); labStatusErr = false;
+        LabEnsureVisible();
+    }
+    void LabInsertChar(wchar_t c) { wchar_t s[2] = { c, 0 }; LabInsert(s); }
+    void LabBackspace() { if (labCaret > 0) { labText.erase(labCaret - 1, 1); labCaret--; LabEnsureVisible(); } }
+    void LabDelete()    { if (labCaret < labText.size()) labText.erase(labCaret, 1); }
+    void LabMoveHoriz(int d) {
+        if (d < 0 && labCaret > 0) labCaret--;
+        else if (d > 0 && labCaret < labText.size()) labCaret++;
+        LabEnsureVisible();
+    }
+    void LabMoveVert(int dir) {
+        int line, col; LabCaretLineCol(line, col);
+        int target = line + dir;
+        if (target < 0 || target >= LabLineCount()) return;
+        size_t s = LabLineStartIndex(target), e = s;
+        while (e < labText.size() && labText[e] != L'\n') e++;
+        size_t len = e - s;
+        labCaret = s + ((size_t)col < len ? (size_t)col : len);
+        LabEnsureVisible();
+    }
+    void LabMoveHome() { int l, c; LabCaretLineCol(l, c); labCaret = LabLineStartIndex(l); }
+    void LabMoveEnd()  {
+        int l, c; LabCaretLineCol(l, c);
+        size_t e = LabLineStartIndex(l);
+        while (e < labText.size() && labText[e] != L'\n') e++;
+        labCaret = e;
+    }
+
+    // Apply the edited source as a hard cut. A rejected edit keeps the running
+    // preset up and shows the engine's message (often with a line/col).
+    void LabApply() {
+        if (!pmActive || !pmHost.ready) { labStatus = L"the lab needs the projectM engine"; labStatusErr = true; return; }
+        std::string u8 = WideToUtf8(labText);
+        bool ok = pmHost.ApplyData(u8.c_str(), false);
+        if (ok) { labStatus = L"applied"; labStatusErr = false; labSeedName = pmHost.PresetName(); }
+        else {
+            std::wstring msg = Utf8ToWide(pmHost.loadFailMsg);
+            labStatus = msg.empty() ? L"load failed" : (L"load failed: " + msg);
+            labStatusErr = true;
+        }
+    }
+    // Save the edit into presets\user\ (its own library page) and point the
+    // picker at it, so it shows immediately and survives restarts.
+    void LabSaveAs() {
+        if (labSaveName.empty()) { labStatus = L"name the preset first"; labStatusErr = true; return; }
+        std::wstring userDir = PmExeDir() + L"presets\\user";
+        CreateDirectoryW((PmExeDir() + L"presets").c_str(), nullptr);
+        CreateDirectoryW(userDir.c_str(), nullptr);
+        std::wstring name = labSaveName;
+        for (wchar_t& c : name) if (c == L'\\' || c == L'/' || c == L':') c = L'_';
+        if (name.size() < 5 || _wcsicmp(name.c_str() + name.size() - 5, L".milk") != 0) name += L".milk";
+        std::wstring path = userDir + L"\\" + name;
+        std::string u8 = WideToUtf8(labText);
+        FILE* fp = _wfopen(path.c_str(), L"wb");
+        if (!fp) { labStatus = L"save failed — could not write the file"; labStatusErr = true; return; }
+        if (!u8.empty()) fwrite(u8.data(), 1, u8.size(), fp);
+        fclose(fp);
+        milkMode = true; libraryFolder = userDir;   // the user folder is now the MILK library
+        pmHost.SetPresetFolder(userDir.c_str());
+        int idx = pmHost.PresetIndexByName(name.c_str());
+        if (idx >= 0) pmHost.LoadPreset(idx, false);
+        labSeedName = name;
+        labStatus = L"saved to presets\\user\\" + name; labStatusErr = false;
+        SaveConfig();
+    }
+
+    // Keyboard while the lab is open. Every key is consumed (the plan's rule:
+    // shortcuts must not fire mid-edit). ESC steps name->editor->closed.
+    void LabKeyDown(WPARAM vk) {
+        bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (vk == VK_ESCAPE) {
+            if (labFocus == LF_NAME) labFocus = LF_EDITOR;
+            else { labPanel = false; labFocus = LF_NONE; }
+            return;
+        }
+        if (labFocus == LF_NAME) {
+            if (vk == VK_RETURN) LabSaveAs();
+            else if (vk == VK_BACK) { if (!labSaveName.empty()) labSaveName.pop_back(); }
+            return;   // printable name keys arrive via WM_CHAR
+        }
+        if (labFocus != LF_EDITOR) return;   // modal: swallow, do nothing
+        switch (vk) {
+        case VK_RETURN: if (ctrl) LabApply(); else LabInsertChar(L'\n'); break;
+        case VK_BACK:   LabBackspace(); break;
+        case VK_DELETE: LabDelete(); break;
+        case VK_TAB:    LabInsert(L"  "); break;   // two-space soft tab
+        case VK_LEFT:   LabMoveHoriz(-1); break;
+        case VK_RIGHT:  LabMoveHoriz(1); break;
+        case VK_UP:     LabMoveVert(-1); break;
+        case VK_DOWN:   LabMoveVert(1); break;
+        case VK_HOME:   LabMoveHome(); break;
+        case VK_END:    LabMoveEnd(); break;
+        case VK_PRIOR:  labScroll -= LabVisibleLines(); if (labScroll < 0) labScroll = 0; break;
+        case VK_NEXT: { labScroll += LabVisibleLines(); int m = LabLineCount() - 1;
+                        if (labScroll > m) labScroll = m; if (labScroll < 0) labScroll = 0; } break;
+        }
+    }
+    void LabChar(wchar_t c) {
+        if (labFocus == LF_NAME) {
+            if (c >= 32 && c != 127 && labSaveName.size() < 80) labSaveName += c;
+        } else if (labFocus == LF_EDITOR) {
+            if (c >= 32 && c != 127) LabInsertChar(c);   // control chars handled in keydown
+        }
+    }
+    void LabScrollBy(int lines) {
+        labScroll += lines;
+        int m = LabLineCount() - 1;
+        if (labScroll > m) labScroll = m;
+        if (labScroll < 0) labScroll = 0;
+    }
+    void LabPlaceCaret(int mx, int my, const LabRects& r) {
+        int line = labScroll + (int)((my - (r.editor.top + 4)) / LAB_LINE_H);
+        if (line < 0) line = 0;
+        int lc = LabLineCount(); if (line >= lc) line = lc - 1;
+        int col = (int)((mx - (r.editor.left + 6)) / LAB_CHAR_W + 0.5f);
+        if (col < 0) col = 0;
+        size_t s = LabLineStartIndex(line), e = s;
+        while (e < labText.size() && labText[e] != L'\n') e++;
+        size_t len = e - s;
+        labCaret = s + ((size_t)col < len ? (size_t)col : len);
+    }
+    bool LabClick(int mx, int my) {
+        if (!labPanel || !rt) return false;
+        float sc = UiScale(); D2D1_SIZE_F sz = rt->GetSize();
+        LabRects r; LabLayout(sz.width / sc, sz.height / sc, r);
+        if (In(r.close, mx, my))   { labPanel = false; labFocus = LF_NONE; return true; }
+        if (In(r.apply, mx, my))   { LabApply(); labFocus = LF_EDITOR; return true; }
+        if (In(r.save, mx, my))    { LabSaveAs(); return true; }
+        if (In(r.nameBox, mx, my)) { labFocus = LF_NAME; return true; }
+        if (In(r.editor, mx, my))  { labFocus = LF_EDITOR; LabPlaceCaret(mx, my, r); return true; }
+        if (!In(r.card, mx, my))   { labPanel = false; labFocus = LF_NONE; }
+        return true;   // modal: swallow every click
+    }
+    void DrawLabEditor(UIPainter& p, const LabRects& r) {
+        float ex = r.editor.left + 6, ey = r.editor.top + 4;
+        float ew = r.editor.right - r.editor.left - 12;
+        int vis = (int)((r.editor.bottom - r.editor.top - 8) / LAB_LINE_H);
+        int maxCols = (int)((ew - 4) / LAB_CHAR_W); if (maxCols < 1) maxCols = 1;
+        int caretLine, caretCol; LabCaretLineCol(caretLine, caretCol);
+        int line = 0; size_t lineStart = 0;
+        for (size_t i = 0; i <= labText.size(); i++) {
+            if (i == labText.size() || labText[i] == L'\n') {
+                if (line >= labScroll && line < labScroll + vis) {
+                    std::wstring text = labText.substr(lineStart, i - lineStart);
+                    if ((int)text.size() > maxCols) text.resize(maxCols);   // clip, never wrap
+                    if (!text.empty())
+                        p.Text(ex, ey + (line - labScroll) * LAB_LINE_H, ew, LAB_LINE_H,
+                               text.c_str(), 0.85f, 0.87f, 0.88f, 0.95f);
+                }
+                line++; lineStart = i + 1;
+                if (i == labText.size()) break;
+            }
+        }
+        if (labFocus == LF_EDITOR && caretLine >= labScroll && caretLine < labScroll + vis) {
+            int cc = caretCol < maxCols ? caretCol : maxCols;
+            p.Rect(ex + cc * LAB_CHAR_W, ey + (caretLine - labScroll) * LAB_LINE_H,
+                   1.5f, LAB_LINE_H - 2, UI_SOFT_R, UI_SOFT_G, UI_SOFT_B, 0.95f);
+        }
+    }
+    void DrawLabPanel(UIPainter& p) {
+        LabRects r; LabLayout(p.W(), p.H(), r);
+        p.Rect(0, 0, p.W(), p.H(), 0, 0, 0, 0.5f);   // scrim
+        float cw = r.card.right - r.card.left, ch = r.card.bottom - r.card.top;
+        p.Rect(r.card.left, r.card.top, cw, ch, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.97f);
+        p.Stroke(r.card.left, r.card.top, cw, ch, 1, 1, 1, 0.15f, 1.0f);
+        float cx = r.card.left + 24;
+        p.Text(cx, r.card.top + 14, 300, 22, L"PRESET LAB", UI_SOFT_R, UI_SOFT_G, UI_SOFT_B, 1.0f);
+        p.Text(cx, r.card.top + 40, cw - 120, 20, labSeedName.c_str(), 1, 1, 1, 0.40f);
+        float clw = r.close.right - r.close.left, clh = r.close.bottom - r.close.top;
+        p.Stroke(r.close.left, r.close.top, clw, clh, 1, 1, 1, 0.25f, 1.0f);
+        p.Text(r.close.left, r.close.top, clw, clh, L"close", 1, 1, 1, 0.7f, true);
+        float ew = r.editor.right - r.editor.left, eh = r.editor.bottom - r.editor.top;
+        p.Rect(r.editor.left, r.editor.top, ew, eh, 0.02f, 0.03f, 0.03f, 0.96f);
+        p.Stroke(r.editor.left, r.editor.top, ew, eh, 1, 1, 1, labFocus == LF_EDITOR ? 0.35f : 0.15f, 1.0f);
+        DrawLabEditor(p, r);
+        float sw = r.status.right - r.status.left;
+        if (!labStatus.empty())
+            p.Text(r.status.left, r.status.top, sw, 22, labStatus.c_str(),
+                   labStatusErr ? 0.90f : UI_SOFT_R, labStatusErr ? 0.40f : UI_SOFT_G,
+                   labStatusErr ? 0.42f : UI_SOFT_B, 1.0f);
+        else
+            p.Text(r.status.left, r.status.top, sw, 22, L"Ctrl+Enter applies \x2022 Esc closes",
+                   1, 1, 1, 0.35f);
+        float aw = r.apply.right - r.apply.left, ah = r.apply.bottom - r.apply.top;
+        p.Rect(r.apply.left, r.apply.top, aw, ah, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 0.20f);
+        p.Stroke(r.apply.left, r.apply.top, aw, ah, UI_ULTRA_R, UI_ULTRA_G, UI_ULTRA_B, 1.0f, 1.0f);
+        p.Text(r.apply.left, r.apply.top, aw, ah, L"apply", UI_SOFT_R, UI_SOFT_G, UI_SOFT_B, 1.0f, true);
+        float nw = r.nameBox.right - r.nameBox.left, nh = r.nameBox.bottom - r.nameBox.top;
+        p.Rect(r.nameBox.left, r.nameBox.top, nw, nh, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.96f);
+        p.Stroke(r.nameBox.left, r.nameBox.top, nw, nh, 1, 1, 1, labFocus == LF_NAME ? 0.40f : 0.15f, 1.0f);
+        std::wstring shown = labSaveName + (labFocus == LF_NAME ? L"_" : L"");
+        p.Text(r.nameBox.left + 8, r.nameBox.top + 5, nw - 16, 22, shown.c_str(), 1, 1, 1, 0.85f);
+        float vw = r.save.right - r.save.left, vh = r.save.bottom - r.save.top;
+        p.Stroke(r.save.left, r.save.top, vw, vh, 1, 1, 1, 0.25f, 1.0f);
+        p.Text(r.save.left, r.save.top, vw, vh, L"save", 1, 1, 1, 0.7f, true);
+    }
+
     // ----- settings persistence (wavescope.ini beside the exe) -----
 
     std::wstring ConfigPath() const { return PmExeDir() + L"wavescope.ini"; }
@@ -2516,6 +2831,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (a->morphDragging) { a->morphDragging = false; a->SaveConfig(); }
         return 0;
     case WM_KEYDOWN:
+        // The preset lab is modal: while it's open every key belongs to the
+        // editor (or its name field) — no app shortcut may fire mid-edit.
+        if (a->labPanel) { a->LabKeyDown(wp); return 0; }
         // While the palette-name field has focus, letters belong to the name
         // (WM_CHAR), not to shortcuts — typing "Sunset" must not cycle the
         // shuffle timer or launch the Spotify flow. ESC still closes.
@@ -2562,7 +2880,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case '4':      a->OpenFile(); break;
         case 'S':      a->CycleShuffle(); break;
         case 'C':      a->SetCalm(!a->calm); break;
-        case 'L':      a->OpenPresetFolder(); break;
+        case 'L':      a->OpenLab(); break;
         case 'M':      // web parity: M = displays
             a->deckVisible = true; a->deckActivity = a->Now();
             if (a->deckMenu == App::DK_DISP) a->deckMenu = -1; else a->OpenMenu(App::DK_DISP);
@@ -2590,8 +2908,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_CHAR:
+        if (a->labPanel) { a->LabChar((wchar_t)wp); return 0; }
         if (a->deckMenu >= 0 && a->pageFocused) a->PageChar((wchar_t)wp);
         else a->PanelChar((wchar_t)wp);
+        return 0;
+    case WM_MOUSEWHEEL:
+        if (a->labPanel) a->LabScrollBy((short)HIWORD(wp) > 0 ? -3 : 3);
         return 0;
     case WM_TRAY:
         if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {

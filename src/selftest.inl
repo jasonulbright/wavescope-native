@@ -442,6 +442,40 @@ static int RunSelfTest(App* v) {
         v->ToggleProjectM();
     }
 
+    // --- preset lab apply/reject contract ---
+    // The lab applies edited .milk text as a hard cut and reports rejections so
+    // a bad edit keeps the previous preset up. projectM tolerates lenient junk
+    // (loads it as a degenerate preset) but rejects genuine eel syntax errors
+    // synchronously, with a message (often a line/col) — the case the lab
+    // actually guards. Assert both directions and that the engine survives.
+    v->ToggleProjectM();
+    if (!v->pmActive || !v->pmHost.ready) {
+        out(L"lab: engine failed to start -> FAIL"); rc = 1;
+    } else {
+        v->EnterProjectM(false);
+        for (int i = 0; i < 20; i++) { pump(); v->Render(); }
+        std::wstring wtext = v->pmHost.CurrentPresetText();
+        int u8n = WideCharToMultiByte(CP_UTF8, 0, wtext.data(), (int)wtext.size(), nullptr, 0, nullptr, nullptr);
+        std::string valid((size_t)(u8n > 0 ? u8n : 0), '\0');
+        if (u8n > 0) WideCharToMultiByte(CP_UTF8, 0, wtext.data(), (int)wtext.size(), &valid[0], u8n, nullptr, nullptr);
+        bool okApply = v->pmHost.ApplyData(valid.c_str(), false);          // valid: accepted
+        bool okBad = v->pmHost.ApplyData("[preset00]\nper_frame_1=zoom = 1 +* ;\n", false); // rejected
+        bool haveMsg = !v->pmHost.loadFailMsg.empty();
+        bool captured;
+        {
+            float pcm[4800]; int nn = g_tap.ReadNew(v->pmCursor, pcm, 4800);
+            v->pmHost.RenderEngine(pcm, nn);
+            std::vector<uint8_t> px; int w = 0, h = 0;
+            captured = v->pmHost.ReadBack(px, w, h);   // still renders after the reject
+        }
+        bool pass = okApply && !okBad && haveMsg && captured;
+        out(L"lab: apply-valid=%d reject-bad-eel=%d msg=%d captured=%d -> %s",
+            okApply ? 1 : 0, !okBad ? 1 : 0, haveMsg ? 1 : 0, captured ? 1 : 0,
+            pass ? L"PASS" : L"FAIL");
+        if (!pass) rc = 1;
+        v->ToggleProjectM();
+    }
+
     out(L"selftest: %s", rc == 0 ? L"ALL PASS" : L"FAILURES (see above)");
     if (log) fclose(log);
     return rc;
