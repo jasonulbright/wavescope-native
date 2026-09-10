@@ -470,6 +470,8 @@ private:
 // The projectM (MilkDrop) engine host: child GL window + libprojectM.
 #include "ui_paint.inl"
 #include "projectm_host.inl"
+#include "app_paths.inl"
+#include "preset_save.inl"
 #include "shader_host.inl"
 #include "spotify.inl"
 #include "options.inl"
@@ -2534,24 +2536,25 @@ struct App {
     // picker at it, so it shows immediately and survives restarts.
     void LabSaveAs() {
         if (labSaveName.empty()) { labStatus = L"name the preset first"; labStatusErr = true; return; }
-        std::wstring userDir = PmExeDir() + L"presets\\user";
-        CreateDirectoryW((PmExeDir() + L"presets").c_str(), nullptr);
-        CreateDirectoryW(userDir.c_str(), nullptr);
-        std::wstring name = labSaveName;
-        for (wchar_t& c : name) if (c == L'\\' || c == L'/' || c == L':') c = L'_';
-        if (name.size() < 5 || _wcsicmp(name.c_str() + name.size() - 5, L".milk") != 0) name += L".milk";
-        std::wstring path = userDir + L"\\" + name;
+        std::wstring userDir = WsDataDir() + L"presets\\user";
+        std::wstring name;
+        if (!WsPresetFileName(labSaveName, name)) {
+            labStatus = L"use a valid Windows filename (not a reserved name or path)"; labStatusErr = true; return;
+        }
         std::string u8 = WideToUtf8(labText);
-        FILE* fp = _wfopen(path.c_str(), L"wb");
-        if (!fp) { labStatus = L"save failed — could not write the file"; labStatusErr = true; return; }
-        if (!u8.empty()) fwrite(u8.data(), 1, u8.size(), fp);
-        fclose(fp);
+        DWORD error = WsSaveNewPreset(userDir, name, u8);
+        if (error) {
+            labStatus = (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS)
+                ? L"a preset with that name already exists — choose a new name"
+                : L"save failed — check the folder and available disk space";
+            labStatusErr = true; return;
+        }
         milkMode = true; libraryFolder = userDir;   // the user folder is now the MILK library
         pmHost.SetPresetFolder(userDir.c_str());
         int idx = pmHost.PresetIndexByName(name.c_str());
         if (idx >= 0) pmHost.LoadPreset(idx, false);
         labSeedName = name;
-        labStatus = L"saved to presets\\user\\" + name; labStatusErr = false;
+        labStatus = L"saved: " + userDir + L"\\" + name; labStatusErr = false;
         SaveConfig();
     }
 
@@ -2687,9 +2690,9 @@ struct App {
         p.Text(r.save.left, r.save.top, vw, vh, L"save", 1, 1, 1, 0.7f, true);
     }
 
-    // ----- settings persistence (wavescope.ini beside the exe) -----
+    // ----- settings persistence (installed data folder or portable exe folder) -----
 
-    std::wstring ConfigPath() const { return PmExeDir() + L"wavescope.ini"; }
+    std::wstring ConfigPath() const { return WsDataDir() + L"wavescope.ini"; }
 
     void SaveConfig() {
         if (isCompanion || g_noPersist) return; // primary window only, never selftest
@@ -2976,17 +2979,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == VK_ESCAPE) a->pageFocused = false;
             return 0;
         }
-        // A paged dropdown is open (field unfocused): Left/Right page it rather
-        // than live-cycling the visual behind it.
-        if (a->deckMenu >= 0 && (wp == VK_LEFT || wp == VK_RIGHT) && a->rt) {
-            int cols, perCol, pageSize, pages;
-            float sc = a->UiScale(); D2D1_SIZE_F sz = a->rt->GetSize();
-            a->MenuMetrics(a->deckMenu, sz.width / sc, sz.height / sc, cols, perCol, pageSize, pages);
-            if (pages > 1) {
-                if (wp == VK_LEFT  && a->menuPage > 0)          a->menuPage--;
-                if (wp == VK_RIGHT && a->menuPage < pages - 1)  a->menuPage++;
-                return 0;
+        // Every dropdown is modal, including a single-page menu. Navigation
+        // must not change the visual, source or recorder behind the menu.
+        if (a->deckMenu >= 0) {
+            if (wp == VK_ESCAPE) a->deckMenu = -1;
+            else if ((wp == VK_LEFT || wp == VK_RIGHT) && a->rt) {
+                int cols, perCol, pageSize, pages;
+                float sc = a->UiScale(); D2D1_SIZE_F sz = a->rt->GetSize();
+                a->MenuMetrics(a->deckMenu, sz.width / sc, sz.height / sc, cols, perCol, pageSize, pages);
+                a->menuPage = Clampi(a->menuPage + (wp == VK_LEFT ? -1 : 1), 0, pages - 1);
             }
+            return 0;
         }
         switch (wp) {
         case VK_SPACE:
@@ -3212,6 +3215,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
 
     LaunchOpts opts = ParseCmdLine();
     g_noPersist = opts.selftest;       // a test run must not rewrite the config
+    if (!WsInitPaths(opts.selftest)) {
+        MessageBoxW(nullptr, L"WaveScope could not open its settings folder.", L"WaveScope", MB_OK | MB_ICONERROR);
+        CoUninitialize(); return 1;
+    }
     srand((unsigned)GetTickCount64()); // shuffle must differ across launches
 
     // Explicit launch-at-login toggles (user runs these deliberately).

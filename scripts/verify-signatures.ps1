@@ -1,7 +1,10 @@
-param([Parameter(Mandatory)][string]$Directory)
+param([Parameter(Mandatory)][string]$Directory, [string]$Installer)
 $ErrorActionPreference = 'Stop'
-foreach ($name in @('WaveScope.exe', 'projectM-4.dll', 'projectM-4-playlist.dll')) {
-    $sig = Get-AuthenticodeSignature -LiteralPath (Join-Path $Directory $name)
+$files = @('WaveScope.exe', 'projectM-4.dll', 'projectM-4-playlist.dll') | ForEach-Object { Join-Path $Directory $_ }
+if ($Installer) { $files += $Installer }
+foreach ($file in $files) {
+    $name = Split-Path -Leaf $file
+    $sig = Get-AuthenticodeSignature -LiteralPath $file
     if ($sig.Status -ne 'Valid' -or !$sig.TimeStamperCertificate) { throw "$name must have a valid timestamped signature (status: $($sig.Status))" }
     $signer = $sig.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
     if ($signer -ne 'Jason Ulbright') { throw "Unexpected signer on ${name}: $signer" }

@@ -198,6 +198,16 @@ static int RunSelfTest(App* v) {
         SendMessageW(v->hwnd, WM_KEYDOWN, '2', 0);
         pass &= g_tap.Source() == source; // a modal panel cannot switch to mic
         v->palPanel = false; v->customPalettes.clear(); v->palInclude.clear(); v->palOffset = 0;
+        int modeBeforeMenu = v->modeIdx;
+        v->OpenMenu(App::DK_RES); // one-page menus must not leak navigation or shortcuts
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_RIGHT, 0);
+        SendMessageW(v->hwnd, WM_KEYDOWN, '2', 0);
+        bool menuPass = v->modeIdx == modeBeforeMenu && g_tap.Source() == source;
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+        menuPass &= v->deckMenu == -1;
+        v->modeIdx = modeBeforeMenu; g_tap.SetSource(source);
+        out(L"gui: dropdown navigation and source shortcut isolation -> %s", menuPass ? L"PASS" : L"FAIL");
+        pass &= menuPass;
         out(L"gui: small-window deck, palette paging, modal input -> %s", pass ? L"PASS" : L"FAIL");
         if (!pass) rc = 1;
     }
@@ -520,6 +530,29 @@ static int RunSelfTest(App* v) {
         bool guiPass = inputPass && editRedraw && closeRedraw;
         out(L"gui: lab shortcut preserves text; edit/close redraw -> %s", guiPass ? L"PASS" : L"FAIL");
         if (!guiPass) rc = 1;
+        // Exercise the actual Save As command, using a new isolated data folder.
+        wchar_t tempRoot[MAX_PATH], tempDir[MAX_PATH];
+        GetTempPathW(MAX_PATH, tempRoot); GetTempFileNameW(tempRoot, L"wsl", 0, tempDir);
+        DeleteFileW(tempDir); CreateDirectoryW(tempDir, nullptr);
+        AppPaths savedPaths = g_paths; g_paths.data = std::wstring(tempDir) + L"\\";
+        v->labText = original; v->labSaveName = L"save-test";
+        v->LabSaveAs();
+        bool savePass = !v->labStatusErr;
+        v->labText = L"must not overwrite the first save";
+        v->LabSaveAs();
+        savePass &= v->labStatusErr && v->labStatus.find(L"already exists") != std::wstring::npos;
+        std::wstring userDir = g_paths.data + L"presets\\user";
+        std::wstring savedFile = userDir + L"\\save-test.milk";
+        FILE* saved = _wfopen(savedFile.c_str(), L"rb");
+        std::string stored;
+        if (saved) { char chunk[4096]; size_t n; while ((n = fread(chunk, 1, sizeof(chunk), saved)) != 0) stored.append(chunk, n); fclose(saved); }
+        savePass &= stored == App::WideToUtf8(original);
+        v->EnterProjectM(false); v->libraryFolder.clear();
+        DeleteFileW(savedFile.c_str()); RemoveDirectoryW(userDir.c_str());
+        RemoveDirectoryW((g_paths.data + L"presets").c_str()); RemoveDirectoryW(tempDir);
+        g_paths = savedPaths;
+        out(L"lab: Save As refuses overwrite and preserves original bytes -> %s", savePass ? L"PASS" : L"FAIL");
+        if (!savePass) rc = 1;
         std::wstring wtext = v->pmHost.CurrentPresetText();
         int u8n = WideCharToMultiByte(CP_UTF8, 0, wtext.data(), (int)wtext.size(), nullptr, 0, nullptr, nullptr);
         std::string valid((size_t)(u8n > 0 ? u8n : 0), '\0');

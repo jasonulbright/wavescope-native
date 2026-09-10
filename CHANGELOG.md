@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0 — 2026-09-10
+
+- Added a signed per-user Windows MSI installer with a Start menu shortcut,
+  repair, upgrades, downgrade protection and standard uninstall support.
+- Clearly named both downloads: `-installer-win64.msi` and `-portable-win64.zip`,
+  each with a SHA-256 checksum. Both contain the same signed app/projectM binaries.
+- Installed settings and saved presets now use `%LOCALAPPDATA%\WaveScope`;
+  recordings use `Videos\WaveScope`. Uninstall preserves user files. Portable
+  copies retain folder-local settings, presets and recordings.
+- Fixed preset lab Save As silently overwriting existing files. Completed
+  writes are now published atomically without replacement; invalid/reserved
+  filenames and write failures are reported. Added concurrent-save regressions.
+- Fixed single-page dropdowns leaking navigation and audio-source shortcuts
+  to the visualizer behind them; added a reproducing GUI regression test.
+- Added installer lifecycle tests and documented portable-to-installed migration.
+
 ## 1.1.1 — 2026-09-09
 
 First signed Windows release, with GUI fixes and the repository's first

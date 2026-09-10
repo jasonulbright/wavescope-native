@@ -60,3 +60,21 @@ The portable ZIP contained no settings, personal presets or test artifacts.
 PowerShell parsing and actionlint passed. The signature verification gate
 correctly rejected the unsigned local build. The pinned dependency build
 script was also built and tested locally with Visual Studio 2026.
+
+## 1.2.0 follow-up — 2026-09-10
+
+- Preset lab Save As used `fopen` with truncation, silently overwriting an
+  existing preset and ignoring partial writes. It now validates Windows
+  filenames, flushes a new temporary file, and publishes it atomically
+  without replacing existing data. Tests cover byte preservation, reserved
+  names, failed writes, concurrent saves, and the actual GUI command.
+- Single-page dropdowns leaked arrow keys and source shortcuts to the app
+  behind them. A new GUI regression failed on 1.1.1 and passes with all
+  dropdown input isolated.
+- The MSI separates installed user data from application files. Lifecycle
+  tests cover install, shortcut/registration, repair, upgrade, downgrade
+  rejection, uninstall and preservation of user files. Tests caught and
+  corrected maintenance initially reverting a custom installation directory.
+- Local packaging still produces unsigned artifacts. The release workflow
+  signs the shared EXE/DLL payload first and the resulting MSI separately,
+  then verifies signatures and hashes both final downloads.

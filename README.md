@@ -1,8 +1,9 @@
 # WaveScope (native)
 
-[![Build and test](https://github.com/jasonulbright/wavescope-native/actions/workflows/ci.yml/badge.svg)](https://github.com/jasonulbright/wavescope-native/actions/workflows/ci.yml)
+[![Build and test](https://github.com/jasonulbright/wavescope-native/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/jasonulbright/wavescope-native/actions/workflows/ci.yml)
 [![Signed release](https://github.com/jasonulbright/wavescope-native/actions/workflows/release.yml/badge.svg)](https://github.com/jasonulbright/wavescope-native/actions/workflows/release.yml)
-[![Latest release](https://img.shields.io/github/v/release/jasonulbright/wavescope-native?label=download&color=39c5bb)](https://github.com/jasonulbright/wavescope-native/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/jasonulbright/wavescope-native?label=release&color=39c5bb)](https://github.com/jasonulbright/wavescope-native/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/jasonulbright/wavescope-native/total?label=downloads)](https://github.com/jasonulbright/wavescope-native/releases)
 [![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4)](#get-it)
 [![MIT license](https://img.shields.io/github/license/jasonulbright/wavescope-native)](LICENSE)
 
@@ -22,19 +23,34 @@ one engine, Spout output for OBS, always-on-top, tray, launch at login.
 
 ## Get it
 
-Grab `WaveScope-v<version>-win64.zip` from the [latest release](https://github.com/jasonulbright/wavescope-native/releases/latest), unzip
-anywhere — USB stick included — and run `WaveScope.exe`. The zip carries
-everything: the projectM DLLs, their app-local VC++ runtime, both preset
-libraries with the texture pack, and the third-party notices. Fully
-portable: settings live in `wavescope.ini` beside the exe. The app's only
-registry setting is its opt-in launch-at-login key; disable startup with
-`WaveScope.exe remove-startup` before deleting the folder if you enabled it.
+Choose a download from the [latest release](https://github.com/jasonulbright/wavescope-native/releases/latest):
+
+| Download | Use it for |
+| --- | --- |
+| **Installer** — `WaveScope-v<version>-installer-win64.msi` | Install for your Windows account, with a Start menu shortcut, repair, upgrades, and removal through Settings → Apps. No administrator account is required. |
+| **Portable** — `WaveScope-v<version>-portable-win64.zip` | Unzip anywhere, including a USB stick, and run `WaveScope.exe`. Settings, saved presets and recordings stay in that folder. |
+
+Both packages include the projectM DLLs, their app-local VC++ runtime, both
+preset libraries, the texture pack, documentation and third-party notices.
+The installer uses `%LOCALAPPDATA%\Programs\WaveScope` for application files;
+user data lives [separately](#persistence) and survives upgrade/uninstall.
+Close WaveScope before upgrading or removing it. If you enabled launch at
+login, run `WaveScope.exe remove-startup` before uninstalling or deleting it.
 
 Requires 64-bit Windows and an OpenGL 3.3-capable graphics driver for the GPU
 and MilkDrop engines. Official ZIPs starting with **v1.1.1** contain
 timestamped signatures from **Jason Ulbright** on the app and projectM DLLs.
-Earlier releases and local builds are unsigned. Each release includes a
-SHA-256 checksum; see [download verification](docs/RELEASING.md#verify-a-download).
+The MSI installer is also signed starting with **v1.2.0**. Versions before
+1.1.1 and local builds are unsigned. Each download has its own SHA-256 checksum;
+see [download verification](docs/RELEASING.md#verify-a-download).
+
+Upgrading from a portable release is optional: you can keep using the ZIP.
+To move to the installer, close the portable app, install, and copy its
+`wavescope.ini` and `presets\user` to the matching paths under
+`%LOCALAPPDATA%\WaveScope` before the first installed launch. Recordings can
+be moved to `Videos\WaveScope`. A saved custom MilkDrop folder remains an
+absolute path; select its new location if you move that folder. Keep the
+portable copy until you have checked the migration.
 
 ## Build
 
@@ -74,12 +90,17 @@ loads or writes personal settings or Spotify tokens.
 
 `package.bat` builds (unit-test gate included), stages the portable layout
 under `dist\`, runs the **staged** exe's selftest as the release gate — the
-zip layout has to prove it runs standalone — and produces
-`dist\WaveScope-v<version>-win64.zip`.
+zip layout has to prove it runs standalone — and produces both
+`dist\WaveScope-v<version>-portable-win64.zip` and
+`dist\WaveScope-v<version>-installer-win64.msi`.
 
 The packer includes only tracked preset/texture assets, excludes personal
-presets and settings, and writes a SHA-256 checksum beside the zip.
-The local build is unsigned. The [signed release workflow](docs/RELEASING.md)
+presets and settings, and writes a SHA-256 checksum beside each download.
+MSI packaging requires a .NET 8+ SDK and restores pinned WiX 5.0.2 tools.
+`scripts/test-installer.ps1 -RunGraphicsTest` checks installation, repair,
+the installed app, uninstall, and user-file preservation in an isolated
+test folder. It refuses to run over an existing WaveScope installation.
+Local packages are unsigned. The [signed release workflow](docs/RELEASING.md)
 uses Azure Artifact Signing and prepares a draft for review. Its hosted
 runner runs unit tests and builds the full package; the graphics selftest
 must run on a Windows desktop with OpenGL 3.3 before release.
@@ -155,14 +176,17 @@ through the lulls. The blend length is saved in `wavescope.ini`.
 over the active preset's whole `.milk` source. `Ctrl+Enter` (or `apply`)
 recompiles it against the running signal; a syntax error keeps the previous
 preset on screen and shows the engine's message. `save` writes the edit to
-`presets\user\` and switches the picker to it. To point MILK at your own
+`presets\user\` inside your [data folder](#persistence) and switches the picker
+to it. Save As requires a new filename and preserves an existing preset if
+the name is reused. To point MILK at your own
 `.milk` archive, click the `milkdrop` deck button again.
 
 ![The preset lab editing wavescope-tunnel.milk over the running engine](assets/screenshot-lab.png)
 
 ## Recording
 
-`R` (or the deck's `rec (R)` button) starts/stops an MP4 beside the exe:
+`R` (or the deck's `rec (R)` button) starts/stops an MP4 in `Videos\WaveScope`
+for installed copies, or beside the exe for portable copies:
 hardware H.264 where available plus AAC of the analysed audio, via Media
 Foundation (no new dependencies). It captures the engine's render target
 *before* the UI, at the current render resolution (built-ins) or window
@@ -214,7 +238,19 @@ never distribute your personal `wavescope.ini` with a release.
 
 ## Persistence
 
-`wavescope.ini` beside the exe: mode, engine (incl. MILK library folder),
+| Files | Installed | Portable |
+| --- | --- | --- |
+| Settings and Spotify login | `%LOCALAPPDATA%\WaveScope\wavescope.ini` | `wavescope.ini` beside the exe |
+| Saved lab presets | `%LOCALAPPDATA%\WaveScope\presets\user` | `presets\user` beside the exe |
+| Recordings | Your Windows Videos folder → `WaveScope` | Beside the exe |
+
+If Windows cannot locate Videos, installed recordings use
+`%LOCALAPPDATA%\WaveScope\Recordings`. Installed copies contain an
+`installed.flag` file; keep it in place so the app finds the correct data
+folders. Portable ZIPs contain no such marker. Uninstall preserves user
+data; remove the data folders yourself if you no longer want those files.
+
+`wavescope.ini` stores mode, engine (incl. MILK library folder),
 palette + custom palettes, resolution, shuffle (incl. include-list), calm,
 window placement, and your Spotify sign-in (client ID + stored login, tied
 to your Windows user account). The primary window's setup is what persists;
@@ -252,6 +288,10 @@ minimize hides to tray (and rendering fully stops while hidden).
   protocol/configuration tests (run by `build.bat`).
 - `src/options.inl` — native Spotify settings dialog.
 - `src/version.h` — release version shared by the app and Windows resources.
+- `src/app_paths.inl` — installed/portable data locations and selftest isolation.
+- `src/preset_save.inl` and `src/storage_tests.inl` — atomic Save As, filename
+  validation and storage regression tests.
+- `installer/WaveScope.wxs` — per-user MSI, shortcuts and upgrade behavior.
 
 ## Dependencies
 
