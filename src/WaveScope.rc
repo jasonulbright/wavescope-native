@@ -88,3 +88,20 @@ BEGIN
     PUSHBUTTON "&Save as new (Ctrl+S)", IDC_LAB_SAVE, 140, 336, 132, 18
     PUSHBUTTON "Close", IDCANCEL, 414, 336, 74, 18
 END
+
+IDD_TRANSPORT DIALOGEX 0, 0, 370, 160
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "WaveScope Audio Player"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "No audio file selected", IDC_AUDIO_FILE, 12, 12, 346, 24, SS_PATHELLIPSIS
+    LTEXT "&Position:", -1, 12, 42, 70, 12
+    LTEXT "0:00 / 0:00", IDC_AUDIO_TIME, 92, 42, 266, 12, SS_RIGHT
+    CONTROL "Playback position", IDC_AUDIO_SEEK, "msctls_trackbar32", WS_TABSTOP | 0x0010, 12, 57, 346, 20
+    PUSHBUTTON "&Pause", IDC_AUDIO_PLAY, 12, 86, 70, 18
+    CONTROL "&Loop file", IDC_AUDIO_LOOP, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 96, 86, 85, 18
+    PUSHBUTTON "&Choose file...", IDC_AUDIO_OPEN, 192, 86, 94, 18
+    PUSHBUTTON "Close", IDCANCEL, 296, 86, 62, 18
+    LTEXT "", IDC_AUDIO_STATUS, 12, 114, 346, 19
+    LTEXT "Ctrl+Space pauses/resumes; Space in the visual advances it.", -1, 12, 138, 346, 12
+END

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added an audio-file player (F5) with filename, elapsed/total time, pause,
+  seeking, replay and a loop toggle. Ctrl+Space pauses/resumes; Space keeps
+  advancing visuals. Paused files feed silence to the visual and recorder.
+- File playback now drains buffered audio before stopping or looping, displays
+  decode/output errors, and isolates each load's state when switching files.
 - Replaced the preset lab's custom text field with a resizable native editor:
   selection, copy/cut/paste, undo/redo, Unicode and horizontal/vertical scrolling.
   Modified text gets an asterisk and a save/discard/cancel prompt on close or

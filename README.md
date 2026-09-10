@@ -69,6 +69,8 @@ portable copy until you have checked the migration.
 The next release also shows the controls and a discovery hint for **15 seconds
 or until the first keypress** on launch. This is implemented in the current
 source; the published v1.2.0 build still requires the bottom-edge gesture.
+The search/favorites browser, pinned controls, native preset editor and audio
+player described below are also implemented for the next release.
 
 ![The launch hint explains how to reveal controls and open Help or Options](assets/screenshot-startup.png)
 
@@ -97,9 +99,19 @@ icon to bring it back. Use the tray's **Quit** command to exit.
 `1` system audio (WASAPI loopback — hears whatever the machine plays,
 silently, no permission dialogs), `2` microphone, `3` demo signal
 (oscillator bank + synthetic kick, analysis-only, matches the web spec),
-`4` audio file (Media Foundation decode, audible, looped). The capture
+`4` audio file (Media Foundation decode, audible, loop enabled initially). The capture
 survives device unplugs and follows Windows default-device changes; silence
 decays to dark instead of freezing.
+
+Choosing a file opens the **Audio Player**; press **F5** or click the active
+**file (F5)** deck button to reopen it. It shows the filename and elapsed/total
+time, with **Pause/Play**, a seek bar and **Loop file**. Drag the bar and release
+to seek, or use its arrow/Page Up/Page Down keys. Seeking while paused keeps it
+paused. Turn Loop off to stop at the end; **Replay** starts it again. Closing
+the player leaves playback running. **Ctrl+Space** pauses/resumes from the
+visual or control windows; **Space** in the visual still advances the preset.
+Seeking and looping are disabled when the decoder cannot provide duration or seek support.
+Playback failures appear in the player; choose a file again to retry.
 
 Analysis matches the web app's Web Audio analyser exactly — Blackman
 window, |X|/N, 0.8 smoothing on linear magnitudes, [-100,-30] dB mapping,
@@ -117,6 +129,8 @@ floor, e^-6dt decay). Same music, same numbers, both apps.
 | `G` | GPU shader engine |
 | `F3` | preset browser: search, favorites, and favorites-only shuffle |
 | `F4` | accessible native Controls window |
+| `F5` | audio-file player: pause, seek, time and loop |
+| `Ctrl+Space` | pause/resume audio-file playback |
 | `Tab` / `Shift+Tab` | reveal and focus the on-screen deck; move between controls |
 | Arrows / `Enter` while the deck is focused | move focus / activate; `Esc` leaves deck focus |
 | `P` | cycle trace palette |
@@ -271,10 +285,12 @@ minimize hides to tray (and rendering fully stops while hidden).
 
 ## Product priorities
 
-The next useful additions are preset search/favorites, keyboard navigation
-and a pinned control deck, standard editor operations, and audio-file playback
-controls. The [product review](docs/PRODUCT-REVIEW.md) describes the gaps and
-recommended order; these are proposals, not shipped features.
+The first four priorities are implemented in the current source: preset
+search/favorites, keyboard navigation and pinned controls, native editor
+operations with unsaved-change protection, and audio-file playback controls.
+The [product review](docs/PRODUCT-REVIEW.md) records their scope and validation.
+Audio-device selection and recording feedback/destination controls remain
+proposals for later work.
 
 ## Build
 
@@ -354,6 +370,10 @@ must run on a Windows desktop with OpenGL 3.3 before release.
 - `src/tests.cpp` and `src/security_tests.inl` — math, registry and adversarial
   protocol/configuration tests (run by `build.bat`).
 - `src/options.inl` — native Spotify settings dialog.
+- `src/preset_browser.inl` and `src/preset_favorites.inl` — search, favorites and shuffle filtering.
+- `src/controls.inl` — accessible native controls and the saved deck pin.
+- `src/lab_native.inl` — native rich-edit preset lab and unsaved-change guards.
+- `src/audio_file.inl` and `src/audio_transport.inl` — file decoding/playback and the native player.
 - `src/version.h` — release version shared by the app and Windows resources.
 - `src/app_paths.inl` — installed/portable data locations and selftest isolation.
 - `src/preset_save.inl` and `src/storage_tests.inl` — atomic Save As, filename
