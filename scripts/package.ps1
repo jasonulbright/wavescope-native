@@ -33,7 +33,7 @@ if (!$FinalizeSigned) {
     }
     Get-ChildItem -LiteralPath $crt.FullName -Filter '*.dll' | Copy-Item -Destination $stage
     # Ship tracked assets only: never personal presets, tokens or recordings.
-    $files = & git -c core.quotepath=false ls-files -- presets presets-classic textures assets/screenshot-deck.png assets/screenshot-lab.png README.md LICENSE CHANGELOG.md THIRD-PARTY-NOTICES.txt
+    $files = & git -c core.quotepath=false ls-files -- presets presets-classic textures assets/screenshot-deck.jpg assets/screenshot-lab.jpg assets/screenshot-gpu.jpg assets/screenshot-startup.png README.md LICENSE CHANGELOG.md THIRD-PARTY-NOTICES.txt
     if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate tracked release files' }
     foreach ($file in $files) {
         $target = Join-Path $stage $file
@@ -41,7 +41,7 @@ if (!$FinalizeSigned) {
         Copy-Item -LiteralPath (Join-Path $repo $file) -Destination $target
     }
     New-Item -ItemType Directory -Path "$stage\docs" -Force | Out-Null
-    foreach ($doc in @('RELEASING.md', 'ADVERSARIAL-REVIEW.md')) {
+    foreach ($doc in @('RELEASING.md', 'ADVERSARIAL-REVIEW.md', 'PRODUCT-REVIEW.md')) {
         Copy-Item -LiteralPath "$repo\docs\$doc" -Destination "$stage\docs"
     }
     if (!$SkipRenderTest) {

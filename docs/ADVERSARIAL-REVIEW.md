@@ -78,3 +78,19 @@ script was also built and tested locally with Visual Studio 2026.
 - Local packaging still produces unsigned artifacts. The release workflow
   signs the shared EXE/DLL payload first and the resulting MSI separately,
   then verifies signatures and hashes both final downloads.
+
+## Unreleased GUI follow-up — 2026-09-10
+
+- Startup visibility now has a 15-second discovery window, with first-key
+  dismissal and preserved menu/mouse behavior. Re-enabling the HUD after idle
+  now makes it visible immediately.
+- Library rescans detached the playing preset incorrectly after deleting its
+  file. The lab could index beyond the shortened list or seed from a different
+  preset. Selection now follows the successfully loaded full path, removed
+  rows detach, and the editor handles an unavailable source.
+- Preset loads previously updated the picker label and editor source before
+  verifying the read or projectM's acceptance. Failed loads now retain the
+  playing selection, and loading explicitly activates the owning GL context.
+- New HUD, live-file deletion and invalid-preset checks failed before these
+  fixes and passed afterward. The complete desktop selftest passed as well.
+  See [the product review](PRODUCT-REVIEW.md) for the remaining usability gaps.

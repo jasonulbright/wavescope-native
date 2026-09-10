@@ -63,9 +63,10 @@ struct ProjectMHost {
     projectm_handle pm = nullptr;
     std::vector<std::wstring> presetPaths;
     std::wstring curName = L"(none)";
+    std::wstring curPath;             // successfully loaded file, independent of the picker
     std::wstring scanDir;             // folder currently scanned/watched
     HANDLE presetWatch = nullptr;     // hot-reload change notification
-    int presetIdx = 0;
+    int presetIdx = -1;               // -1 when the playing preset is no longer in this library
     bool ready = false;
     int lost = 0;             // consecutive wglMakeCurrent failures (GPU reset)
     bool loadFailed = false;  // set by the preset-switch-failed callback below
@@ -218,6 +219,11 @@ struct ProjectMHost {
                   [](const std::wstring& a, const std::wstring& b) {
                       return _wcsicmp(a.c_str(), b.c_str()) < 0;
                   });
+        // A rescan can remove or reorder the active row. Match its full path
+        // so a different folder's same-named file never becomes the lab source.
+        presetIdx = -1;
+        for (size_t i = 0; i < presetPaths.size(); ++i)
+            if (_wcsicmp(curPath.c_str(), presetPaths[i].c_str()) == 0) { presetIdx = (int)i; break; }
         if (presetWatch && presetWatch != INVALID_HANDLE_VALUE)
             FindCloseChangeNotification(presetWatch);
         presetWatch = FindFirstChangeNotificationW(folder.c_str(), FALSE,
@@ -228,32 +234,31 @@ struct ProjectMHost {
     void PollReload() {
         if (!presetWatch || presetWatch == INVALID_HANDLE_VALUE) return;
         if (WaitForSingleObject(presetWatch, 0) != WAIT_OBJECT_0) return;
-        std::wstring keep = curName;
         ScanPresets(scanDir);   // re-arms the watch
-        // Keep the same preset selected if it survived the change.
-        for (size_t i = 0; i < presetPaths.size(); i++) {
-            const wchar_t* base = wcsrchr(presetPaths[i].c_str(), L'\\');
-            if (keep == (base ? base + 1 : presetPaths[i].c_str())) { presetIdx = (int)i; break; }
-        }
     }
 
     // Load a preset by index from its raw .milk text.
     void LoadPreset(int idx, bool smooth) {
         if (!pm || presetPaths.empty()) return;
         int n = (int)presetPaths.size();
-        presetIdx = ((idx % n) + n) % n;
-        const std::wstring& path = presetPaths[presetIdx];
-        const wchar_t* base = wcsrchr(path.c_str(), L'\\');
-        curName = base ? base + 1 : path;
+        int target = ((idx % n) + n) % n;
+        const std::wstring& path = presetPaths[target];
+        loadFailed = true; loadFailMsg = "Could not read the preset file.";
         FILE* fp = _wfopen(path.c_str(), L"rb");
         if (!fp) return;
-        fseek(fp, 0, SEEK_END); long len = ftell(fp); fseek(fp, 0, SEEK_SET);
-        if (len > 0 && len < 1 << 20) {
-            char* buf = (char*)malloc(len + 1);
-            if (buf) {
-                size_t rd = fread(buf, 1, len, fp); buf[rd] = 0;
-                projectm_load_preset_data(pm, buf, smooth);
-                free(buf);
+        long len = fseek(fp, 0, SEEK_END) == 0 ? ftell(fp) : -1;
+        if (len > 0 && len < (1 << 20) && fseek(fp, 0, SEEK_SET) == 0) {
+            std::string text((size_t)len, '\0');
+            if (fread(text.data(), 1, (size_t)len, fp) == (size_t)len && wglMakeCurrent(dc, glrc)) {
+                loadFailed = false; loadFailMsg.clear();
+                projectm_load_preset_data(pm, text.c_str(), smooth);
+                // A rejected preset leaves projectM rendering the old one.
+                // Commit its label and editor source only after acceptance.
+                if (!loadFailed) {
+                    presetIdx = target; curPath = path;
+                    const wchar_t* base = wcsrchr(path.c_str(), L'\\');
+                    curName = base ? base + 1 : path;
+                }
             }
         }
         fclose(fp);
@@ -262,7 +267,16 @@ struct ProjectMHost {
     // Hard cut (smooth=false): projectM's soft-cut cross-fade blends the new
     // preset in before its first frame has initialized, which flashes white on
     // switch. A hard swap renders the new preset directly and avoids it.
-    void NextPreset(int dir) { if (ready) LoadPreset(presetIdx + dir, false); }
+    void NextPreset(int dir) {
+        if (!ready) return;
+        int target = presetIdx < 0 ? (dir < 0 ? PresetCount() - 1 : 0) : presetIdx + dir;
+        // Keeping the playing selection on failure must not trap navigation
+        // on its broken neighbor. Try each file at most once.
+        for (int tried = 0; tried < PresetCount(); ++tried, target += dir) {
+            LoadPreset(target, false);
+            if (!loadFailed) break;
+        }
+    }
 
     // Deliberate morph: cross-fade from the playing preset to preset `idx`
     // over `seconds`, letting projectM blend both presets' state (a true
@@ -302,8 +316,8 @@ struct ProjectMHost {
     // Full source text of the current preset (its UTF-8 .milk file decoded to
     // UTF-16), to seed the lab editor. Empty if there's nothing to read.
     std::wstring CurrentPresetText() const {
-        if (presetPaths.empty()) return L"";
-        FILE* fp = _wfopen(presetPaths[presetIdx].c_str(), L"rb");
+        if (curPath.empty()) return L"";
+        FILE* fp = _wfopen(curPath.c_str(), L"rb");
         if (!fp) return L"";
         fseek(fp, 0, SEEK_END); long len = ftell(fp); fseek(fp, 0, SEEK_SET);
         std::wstring out;

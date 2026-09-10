@@ -623,7 +623,8 @@ struct App {
     enum { LF_NONE, LF_EDITOR, LF_NAME };
     int labFocus = LF_NONE;         // which lab field holds keyboard focus
     bool hud = true;         // master enable (H); when on, auto-fades on idle
-    float hudActivity = 0;   // last mouse-move time; HUD fades out after it
+    float hudActivity = -3;  // last mouse-move time; launch visibility is separate
+    float startupUiUntil = -1; // -1: awaiting first frame; 0: dismissed/expired
     bool help = false;       // F1 / ? full keymap overlay
     bool deckVisible = false;// auto-hiding bottom control bar
     int deckHover = -1;      // button under the cursor, or -1
@@ -644,6 +645,21 @@ struct App {
         LARGE_INTEGER t;
         QueryPerformanceCounter(&t);
         return (float)((double)(t.QuadPart - qpcStart.QuadPart) / (double)qpcFreq.QuadPart);
+    }
+
+    bool StartupUiVisible() const { return startupUiUntil > 0; }
+    bool DeckShown() const { return deckVisible || deckMenu >= 0 || StartupUiVisible(); }
+
+    void UpdateUiVisibility(float now) {
+        // Start on the first rendered frame, so engine loading doesn't consume
+        // the discovery window. Keyboard dismissal also works before that frame.
+        if (startupUiUntil < 0) startupUiUntil = now + 15.0f;
+        if (now >= startupUiUntil) startupUiUntil = 0;
+        // Keep ordinary mouse activity independent of the launch override.
+        // An open dropdown remains usable after the discovery window ends.
+        if (deckVisible && deckMenu < 0 && now - deckActivity > 3.0f) {
+            deckVisible = false; deckHover = -1;
+        }
     }
 
     bool CreateGraphics() {
@@ -714,7 +730,8 @@ struct App {
         float sc = UiScale();
         std::wstring sig = std::to_wstring((int)(sc * 100)) + L"|" +
             std::to_wstring(olW) + L"|" + std::to_wstring(olH) + L"|" +
-            std::to_wstring(deckVisible) + L"|" + std::to_wstring(deckHover) + L"|" +
+            std::to_wstring(DeckShown()) + L"|" + std::to_wstring(deckHover) + L"|" +
+            std::to_wstring(StartupUiVisible()) + L"|" +
             std::to_wstring(help) + L"|" + std::to_wstring(deckMenu) + L"|" +
             std::to_wstring((int)(HudFade() * 12)) + L"|" +   // fade steps → re-render as HUD fades
             std::to_wstring(DeckActive(DK_SYS)) + std::to_wstring(DeckActive(DK_MIC)) +
@@ -923,7 +940,7 @@ struct App {
         if (!rt) return;
         D2D1_SIZE_F size = rt->GetSize();
         float now = Now();
-        if (hudActivity == 0) hudActivity = now;   // show the HUD at launch, then fade
+        UpdateUiVisibility(now);
 
         // Shuffle timer: hop to a random other visual (or preset) on interval.
         // DJ (negative interval) hops the engine as well.
@@ -944,9 +961,6 @@ struct App {
 
         if (calm) frame.beat *= 0.2f; // photosensitivity: tame the pulse
 
-        // Auto-hide the deck after 3 s idle (web parity); an open dropdown
-        // keeps it alive.
-        if (deckVisible && deckMenu < 0 && now - deckActivity > 3.0f) { deckVisible = false; deckHover = -1; }
         RECT crc; GetClientRect(hwnd, &crc);
 
         // projectM engine: render OpenGL on the child window, then composite
@@ -1782,7 +1796,7 @@ struct App {
         RECT rc; GetClientRect(hwnd, &rc);
         int hit = DeckHitTest(mx, my);
         if (my > (int)(rc.bottom / sc) - 175 || hit >= 0 || deckMenu >= 0) { deckVisible = true; deckActivity = Now(); }
-        deckHover = deckVisible ? hit : -1;
+        deckHover = DeckShown() ? hit : -1;
     }
 
     void OnClick(int pxx, int pxy) {
@@ -1792,7 +1806,7 @@ struct App {
         if (LabClick(mx, my)) return;
         if (PanelClick(mx, my)) return;
         if (MenuClick(mx, my)) { deckActivity = Now(); return; }
-        if (!deckVisible) return;
+        if (!DeckShown()) return;
         // Morph slider: press-and-drag to set the blend length. It sits in the
         // gap between the morph buttons, which DeckHitTest reports as no button.
         if (pmActive && rt && !DeckHidden(DK_MORPHT)) {
@@ -1812,11 +1826,12 @@ struct App {
         if (hit >= 0) { DeckDispatch(hit); deckActivity = Now(); }
     }
 
-    // HUD opacity: full while the mouse is active, fading to 0 after ~2s idle;
+    // HUD opacity: full during launch or mouse activity, fading after ~2s idle;
     // 0 when the user has toggled it off with H. No button — the ? overlay
     // documents the shortcut (web parity).
     float HudFade() {
         if (!hud) return 0.0f;
+        if (StartupUiVisible()) return 1.0f;
         const float HOLD = 2.0f, FADE = 0.9f;
         float f = 1.0f - (Now() - hudActivity - HOLD) / FADE;
         return f < 0 ? 0 : (f > 1 ? 1 : f);
@@ -1853,8 +1868,20 @@ struct App {
         }
         if (labPanel) { DrawLabPanel(p); return; }       // modal: hides deck
         if (palPanel) { DrawPalettePanel(p); return; }  // modal: hides deck
-        if (deckVisible) DrawDeckP(p);
-        if (deckVisible) DrawMenu(p);         // open dropdown sits above its anchor
+        if (StartupUiVisible() && !help && deckMenu < 0) {
+            D2D1_RECT_F buttons[DK_N];
+            D2D1_RECT_F bar = DeckLayout(p.W(), p.H(), buttons);
+            float w = std::min(640.0f, p.W() - 32), x = (p.W() - w) * 0.5f;
+            float y = bar.top - 78;
+            p.Rect(x, y, w, 66, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.95f);
+            p.Text(x + 14, y + 9, w - 28, 50,
+                L"Move the mouse to the bottom edge to bring back the controls.\n"
+                L"F1  Help     F2  Options     H  Toggle status display\n"
+                L"Auto-hides after 15 seconds or your first keypress.",
+                1, 1, 1, 0.95f);
+        }
+        if (DeckShown()) DrawDeckP(p);
+        if (DeckShown()) DrawMenu(p);         // open dropdown sits above its anchor
         if (help) DrawHelpP(p);
     }
 
@@ -1931,10 +1958,11 @@ struct App {
             L"F              fullscreen        H   HUD (auto-fades on idle)\n"
             L"T              always on top     F1 / ?   help    F2   options\n"
             L"ESC            close panel / menu / fullscreen, then quit\n"
+            L"Mouse          bottom edge reveals controls; movement wakes HUD\n"
             L"\n"
             L"Launch: WaveScope.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
             L"        [install-startup | remove-startup]   \x2014   tray icon: right-click";
-        float w = 620, h = 505;
+        float w = 620, h = 523;
         float x = (p.W() - w) * 0.5f, y = (p.H() - h) * 0.5f;
         if (x < 0) x = 0; if (y < 0) y = 0;
         p.Rect(x, y, w, h, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.95f);
@@ -2451,6 +2479,10 @@ struct App {
         labSeedName = pmHost.PresetName();
         labCaret = 0; labScroll = 0;
         labStatus.clear(); labStatusErr = false;
+        if (labText.empty()) {
+            labStatus = L"The active preset file is unavailable. Choose another preset to edit.";
+            labStatusErr = true;
+        }
         labFocus = LF_EDITOR;
         std::wstring base = labSeedName;
         size_t dot = base.rfind(L".milk");
@@ -2953,7 +2985,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CAPTURECHANGED:
         if (a->morphDragging) { a->morphDragging = false; a->SaveConfig(); }
         return 0;
+    case WM_SYSKEYDOWN:
+        a->startupUiUntil = 0;
+        break;  // preserve Windows shortcuts such as Alt+F4
     case WM_KEYDOWN:
+        a->startupUiUntil = 0; // dismiss the launch preview, then handle this key normally
         // The preset lab is modal: while it's open every key belongs to the
         // editor (or its name field) — no app shortcut may fire mid-edit.
         if (a->labPanel) { a->LabKeyDown(wp); return 0; }
@@ -3023,7 +3059,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'O':      a->ToggleSpout(); break;       // Spout output (OBS)
         case 'B':      a->SpotifyButton(); break;  // Spotify: authorize + play
         case 'F':      a->ToggleFullscreen(); break;
-        case 'H':      a->hud = !a->hud; break;
+        case 'H':
+            a->hud = !a->hud;
+            if (a->hud) a->hudActivity = a->Now();
+            break;
         case VK_F2:    a->OpenOptions(); break;
         case VK_F1:    a->help = !a->help; break;
         case VK_OEM_2: if (GetKeyState(VK_SHIFT) & 0x8000) a->help = !a->help; break; // '?'

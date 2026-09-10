@@ -19,7 +19,9 @@ MilkDrop library in original form — and adds the things only a desktop app
 can do: silent WASAPI loopback, MP4 clip recording, companion displays from
 one engine, Spout output for OBS, always-on-top, tray, launch at login.
 
-![The projectM engine with the control deck: preset picker, engines, shuffle, and the morph row](assets/screenshot-deck.png)
+![WaveScope's Nebula preset in projectM, with the preset picker, engines, Options and morph controls visible](assets/screenshot-deck.jpg)
+
+*Nebula on the demo signal. All screenshots are captured from the native app.*
 
 ## Get it
 
@@ -37,8 +39,9 @@ user data lives [separately](#persistence) and survives upgrade/uninstall.
 Close WaveScope before upgrading or removing it. If you enabled launch at
 login, run `WaveScope.exe remove-startup` before uninstalling or deleting it.
 
-Requires 64-bit Windows and an OpenGL 3.3-capable graphics driver for the GPU
-and MilkDrop engines. Official ZIPs starting with **v1.1.1** contain
+Requires Windows 10 version 1703 or newer (including Windows 11), x64, and
+an OpenGL 3.3-capable graphics driver for the GPU and MilkDrop engines.
+Official ZIPs starting with **v1.1.1** contain
 timestamped signatures from **Jason Ulbright** on the app and projectM DLLs.
 The MSI installer is also signed starting with **v1.2.0**. Versions before
 1.1.1 and local builds are unsigned. Each download has its own SHA-256 checksum;
@@ -52,58 +55,27 @@ be moved to `Videos\WaveScope`. A saved custom MilkDrop folder remains an
 absolute path; select its new location if you move that folder. Keep the
 portable copy until you have checked the migration.
 
-## Build
+## First launch
 
-```
-build.bat
-```
+1. Start playing music in any app. WaveScope listens to your Windows default
+   output; Spotify authorization is optional. Press **3** for a silent demo
+   signal if you want to explore without playing music.
+2. Move the mouse to the **bottom edge** to reveal the controls. Choose
+   **GPU** for shader effects, **projectM** for the bundled WaveScope presets,
+   or **milkdrop** for the classic library. Use **Space / → / ←** to browse.
+3. Press **F** for fullscreen, **F1** for the keymap, and **F2** for Spotify
+   Options. **H** toggles the status display; mouse movement wakes it while enabled.
 
-Requires Visual Studio 2022 or 2026 with C++ desktop tools and a Windows SDK.
-First [build the pinned projectM dependency](docs/RELEASING.md#build-dependency-from-the-pinned-source)
-with the included PowerShell script. Set `PMROOT` to its `install-native`
-directory; the default is `C:\projects\projectm\install-native`. The batch file:
+The next release also shows the controls and a discovery hint for **15 seconds
+or until the first keypress** on launch. This is implemented in the current
+source; the published v1.2.0 build still requires the bottom-edge gesture.
 
-1. builds and **runs the unit and adversarial tests** (`src/tests.cpp`) — a red test fails
-   the build;
-2. builds `WaveScope.exe` (`/MT`, no MSVC redistributable needed for the
-   core app);
-3. stages `projectM-4.dll` + `projectM-4-playlist.dll` beside the exe
-   (these two need the VC runtime, present wherever VS or the VC redist is).
+![The launch hint explains how to reveal controls and open Help or Options](assets/screenshot-startup.png)
 
-## Verify
-
-```
-WaveScope.exe selftest
-```
-
-Renders every engine on the demo signal and asserts real output: sweeps all
-34 modes and all 17 shaders (17/17 must compile), records a 1.6 s MP4 and
-re-opens/decodes it, does a Spout roundtrip through an in-process receiver,
-sweeps a spread of the 551 classic presets through the ns-eel parser, dumps
-PNGs of what actually rendered beside the exe, writes
-`wavescope-selftest.log`, and exits nonzero on any failure. It also exercises
-GUI layout/input, lab redraw, morphing, VJ and recording restart regressions.
-Run it on a Windows desktop after rendering or GUI changes. Selftest never
-loads or writes personal settings or Spotify tokens.
-
-## Package
-
-`package.bat` builds (unit-test gate included), stages the portable layout
-under `dist\`, runs the **staged** exe's selftest as the release gate — the
-zip layout has to prove it runs standalone — and produces both
-`dist\WaveScope-v<version>-portable-win64.zip` and
-`dist\WaveScope-v<version>-installer-win64.msi`.
-
-The packer includes only tracked preset/texture assets, excludes personal
-presets and settings, and writes a SHA-256 checksum beside each download.
-MSI packaging requires a .NET 8+ SDK and restores pinned WiX 5.0.2 tools.
-`scripts/test-installer.ps1 -RunGraphicsTest` checks installation, repair,
-the installed app, uninstall, and user-file preservation in an isolated
-test folder. It refuses to run over an existing WaveScope installation.
-Local packages are unsigned. The [signed release workflow](docs/RELEASING.md)
-uses Azure Artifact Signing and prepares a draft for review. Its hosted
-runner runs unit tests and builds the full package; the graphics selftest
-must run on a Windows desktop with OpenGL 3.3 before release.
+If the picture is quiet, try **3** first, then **1** to return to system audio.
+For microphone input (**2**), check that the intended microphone is Windows'
+default input. Minimizing hides WaveScope to its tray icon; double-click that
+icon to bring it back. Use the tray's **Quit** command to exit.
 
 ## The three engines
 
@@ -111,7 +83,14 @@ must run on a Windows desktop with OpenGL 3.3 before release.
 |---|---|
 | **WaveScope** | 34 built-in modes in five families (spectrum 9, waveform 6, particles 6, geometry 6, field 7), Direct2D, faithful ports of the web canvas math, phosphor-trail retained rendering. |
 | **GPU** | All 17 web WGSL shader modes ported 1:1 to GLSL 330 (Plasma field … Scope lines), compiled at runtime on a WGL context. Audio uniforms plus per-frame FFT (1024×R8) and waveform (2048×R8) textures with `spec()/specLog()/wav()`. |
-| **projectM / MILK** | Real MilkDrop via native libprojectM. PROJM plays the 15 bundled WaveScope presets (same files as the web app). MILK plays the **original classic library — 551 presets from the official MilkDrop distribution** (`presets-classic\`, with the shared texture pack in `textures\`) — or your own `.milk` folder (click the `milkdrop` deck button again to pick; hot-reloads on change). These are the true originals of the ~60 converted classics the web's Butterchurn engine ships, running on the real ns-eel VM. |
+| **projectM / MILK** | Real MilkDrop via native libprojectM. PROJM plays the 15 bundled WaveScope presets (same files as the web app). MILK plays the **original classic library — 551 presets from the official MilkDrop distribution** (`presets-classic\`, with the shared texture pack in `textures\`) — or your own `.milk` folder (click the `milkdrop` deck button again to pick; the file list refreshes on change). These are the true originals of the ~60 converted classics the web's Butterchurn engine ships, running on the real ns-eel VM. |
+
+<details>
+<summary>See the GPU engine: Warp tunnel</summary>
+
+![The Warp tunnel shader with the native GPU control deck](assets/screenshot-gpu.jpg)
+
+</details>
 
 ## Sources
 
@@ -157,8 +136,11 @@ Resolution targets (AUTO / 1080 / 1440 / 4K / 8K) live in the deck's
 `RES ▾` dropdown; they drive the built-in modes' offscreen render. The GL
 engines (GPU / projectM) always render at window size — fullscreen is
 already native resolution — and the HUD's RES line reports the pixels
-actually rendered either way. The deck reveals when the mouse nears the
-bottom edge and hides after 3 s idle; under GPU/projectM the trace-palette
+actually rendered either way. In the current source, the status display and control deck
+stay visible for 15 seconds or until the first keypress, with a hint showing
+how to find the controls again. That key still performs its normal action.
+The deck reveals when the mouse nears the bottom edge and hides after 3 s idle;
+`F1` opens the keymap and `F2` opens Options. Under GPU/projectM the trace-palette
 controls hide (they color the built-in modes), web-style. DJ shuffle hops
 engine AND visual every 30 s; VJ shuffle switches on the music itself — a
 bass drop hard-cuts, a long lull morphs.
@@ -179,9 +161,11 @@ preset on screen and shows the engine's message. `save` writes the edit to
 `presets\user\` inside your [data folder](#persistence) and switches the picker
 to it. Save As requires a new filename and preserves an existing preset if
 the name is reused. To point MILK at your own
-`.milk` archive, click the `milkdrop` deck button again.
+`.milk` archive, click the `milkdrop` deck button again. The picker refreshes
+when files are added or removed. External edits to the playing file take
+effect when you select it again; the lab's **apply** button applies edits immediately.
 
-![The preset lab editing wavescope-tunnel.milk over the running engine](assets/screenshot-lab.png)
+![The preset lab editing wavescope-nebula.milk over the running engine](assets/screenshot-lab.jpg)
 
 ## Recording
 
@@ -262,6 +246,67 @@ source intentionally resets to system audio each launch.
 `install-startup` / `remove-startup` (HKCU Run key, off by default) ·
 `selftest`. Tray icon: right-click for Show/Hide, Always on top, Quit;
 minimize hides to tray (and rendering fully stops while hidden).
+
+## Product priorities
+
+The next useful additions are preset search/favorites, keyboard navigation
+and a pinned control deck, standard editor operations, and audio-file playback
+controls. The [product review](docs/PRODUCT-REVIEW.md) describes the gaps and
+recommended order; these are proposals, not shipped features.
+
+## Build
+
+```
+build.bat
+```
+
+Requires Visual Studio 2022 or 2026 with C++ desktop tools and a Windows SDK.
+First [build the pinned projectM dependency](docs/RELEASING.md#build-dependency-from-the-pinned-source)
+with the included PowerShell script. Set `PMROOT` to its `install-native`
+directory; the default is `C:\projects\projectm\install-native`. The batch file:
+
+1. builds and **runs the unit and adversarial tests** (`src/tests.cpp`) — a red test fails
+   the build;
+2. builds `WaveScope.exe` (`/MT`, no MSVC redistributable needed for the
+   core app);
+3. stages `projectM-4.dll` + `projectM-4-playlist.dll` beside the exe
+   (these two need the VC runtime, present wherever VS or the VC redist is).
+
+## Verify
+
+```
+WaveScope.exe selftest
+```
+
+Renders every engine on the demo signal and asserts real output: sweeps all
+34 modes and all 17 shaders (17/17 must compile), records a 1.6 s MP4 and
+re-opens/decodes it, does a Spout roundtrip through an in-process receiver,
+sweeps a spread of the 551 classic presets through the ns-eel parser, dumps
+PNGs of what actually rendered beside the exe, writes
+`wavescope-selftest.log`, and exits nonzero on any failure. It also exercises
+GUI layout/input, startup visibility, HUD re-enable, preset deletion/rejection,
+lab redraw, morphing, VJ and recording restart regressions.
+Run it on a Windows desktop after rendering or GUI changes. Selftest never
+loads or writes personal settings or Spotify tokens.
+
+## Package
+
+`package.bat` builds (unit-test gate included), stages the portable layout
+under `dist\`, runs the **staged** exe's selftest as the release gate — the
+zip layout has to prove it runs standalone — and produces both
+`dist\WaveScope-v<version>-portable-win64.zip` and
+`dist\WaveScope-v<version>-installer-win64.msi`.
+
+The packer includes only tracked preset/texture assets, excludes personal
+presets and settings, and writes a SHA-256 checksum beside each download.
+MSI packaging requires a .NET 8+ SDK and restores pinned WiX 5.0.2 tools.
+`scripts/test-installer.ps1 -RunGraphicsTest` checks installation, repair,
+the installed app, uninstall, and user-file preservation in an isolated
+test folder. It refuses to run over an existing WaveScope installation.
+Local packages are unsigned. The [signed release workflow](docs/RELEASING.md)
+uses Azure Artifact Signing and prepares a draft for review. Its hosted
+runner runs unit tests and builds the full package; the graphics selftest
+must run on a Windows desktop with OpenGL 3.3 before release.
 
 ## Source map
 
