@@ -635,18 +635,37 @@ static int RunSelfTest(App* v) {
     } else {
         v->EnterProjectM(false);
         for (int i = 0; i < 20; i++) { pump(); v->Render(); }
-        std::wstring original = v->pmHost.CurrentPresetText();
+        std::wstring original = WsLabLines(v->pmHost.CurrentPresetText());
         SendMessageW(v->hwnd, WM_KEYDOWN, 'L', 0);
         SendMessageW(v->hwnd, WM_CHAR, 'l', 0);
-        bool inputPass = v->labPanel && v->labText == original;
+        bool inputPass = v->labPanel && v->labDialog && v->labText == original;
         RECT client; GetClientRect(v->hwnd, &client);
         v->BuildOverlay(client.right, client.bottom, L"fixed", L"");
-        SendMessageW(v->hwnd, WM_CHAR, 'z', 0);
-        bool editRedraw = v->BuildOverlay(client.right, client.bottom, L"fixed", L"");
-        SendMessageW(v->hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+        HWND editor = GetDlgItem(v->labDialog, IDC_LAB_EDITOR);
+        SendMessageW(editor, EM_SETSEL, 0, 0);
+        SendMessageW(editor, EM_REPLACESEL, TRUE, (LPARAM)L"z");
+        bool editPass = v->labText == L"z" + original && v->labText != v->labSavedText;
+        SendMessageW(editor, EM_UNDO, 0, 0);
+        editPass &= v->labText == original && v->labText == v->labSavedText;
+        SendMessageW(editor, EM_REDO, 0, 0);
+        editPass &= v->labText == L"z" + original;
+        SendMessageW(editor, EM_SETSEL, 0, 1);
+        SendMessageW(editor, EM_REPLACESEL, TRUE, (LPARAM)L"\x03a9\xd83d\xde00");
+        editPass &= v->labText == L"\x03a9\xd83d\xde00" + original;
+        editPass &= !v->CloseLab(IDCANCEL) && IsWindow(v->labDialog);
+        SetDlgItemTextW(v->labDialog, IDC_LAB_NAME, L"CON");
+        editPass &= !v->CloseLab(IDYES) && IsWindow(v->labDialog) && v->labStatusErr;
+        // Restore the known source for a representative editor capture.
+        SetWindowTextW(editor, original.c_str()); v->SyncLabEditor();
+        SetDlgItemTextW(v->labDialog, IDC_LAB_NAME, L"wavescope-tunnel edit");
+        v->labStatus = L"Ctrl+Enter applies; Ctrl+S saves a new preset."; v->RefreshLabStatus();
+        std::vector<uint8_t> labPixels; int lw = 0, lh = 0;
+        if (StCaptureWindow(v->labDialog, labPixels, lw, lh))
+            StWritePng((dir + L"selftest-lab-native.png").c_str(), labPixels.data(), lw, lh, false);
+        v->CloseLab(IDNO);
         bool closeRedraw = v->BuildOverlay(client.right, client.bottom, L"fixed", L"");
-        bool guiPass = inputPass && editRedraw && closeRedraw;
-        out(L"gui: lab shortcut preserves text; edit/close redraw -> %s", guiPass ? L"PASS" : L"FAIL");
+        bool guiPass = inputPass && editPass && closeRedraw && IsWindowEnabled(v->hwnd);
+        out(L"gui: native editor selection, Unicode, undo/redo, cancel and failed-save guard -> %s", guiPass ? L"PASS" : L"FAIL");
         if (!guiPass) rc = 1;
         // Exercise the actual Save As command, using a new isolated data folder.
         wchar_t tempRoot[MAX_PATH], tempDir[MAX_PATH];
