@@ -75,5 +75,5 @@ void App::ControlsCommand(int id, int code) {
         int selection = (int)SendDlgItemMessageW(controlsDialog, id, CB_GETCURSEL, 0, 0);
         if (selection >= 0 && selection < MenuCount(i) && !MenuDisabled(i, selection)) MenuSelect(i, selection);
     } else if (code == BN_CLICKED) DeckDispatch(i);
-    RefreshControls();
+    if (controlsDialog) RefreshControls();
 }

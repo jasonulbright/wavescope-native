@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Replaced the preset lab's custom text field with a resizable native editor:
+  selection, copy/cut/paste, undo/redo, Unicode and horizontal/vertical scrolling.
+  Modified text gets an asterisk and a save/discard/cancel prompt on close or
+  exit; failed saves keep the editor open. Shuffle pauses while editing.
 - Added saved pinned controls, Tab/arrow/Enter navigation on the deck and
   menus, and an accessible native Controls window (F4).
 - Added a native preset browser (F3) with live search, saved favorites,

@@ -172,18 +172,22 @@ the engine's soft cut. Timed shuffle uses that same blend length, so preset
 hops glide instead of cutting; `VJ` shuffle drops on the beat and morphs
 through the lulls. The blend length is saved in `wavescope.ini`.
 
-`L` (or the deck's `lab (L)` button) opens the **preset lab** — a live editor
-over the active preset's whole `.milk` source. `Ctrl+Enter` (or `apply`)
+`L` (or the deck's `lab (L)` button) opens the **preset lab**, a resizable native
+editor for the active preset's whole `.milk` source. It supports text selection,
+copy/cut/paste, undo/redo and horizontal/vertical scrolling. `Ctrl+Enter` (or **Apply**)
 recompiles it against the running signal; a syntax error keeps the previous
-preset on screen and shows the engine's message. `save` writes the edit to
+preset on screen and shows the engine's message. `Ctrl+S` (**Save as new**) writes the edit to
 `presets\user\` inside your [data folder](#persistence) and switches the picker
 to it. Save As requires a new filename and preserves an existing preset if
-the name is reused. To point MILK at your own
+the name is reused. An asterisk marks unsaved text; closing the editor or app
+offers save, discard or cancel. A failed save keeps editing open. Automatic
+shuffle holds while the lab is open, while the visual continues rendering.
+To point MILK at your own
 `.milk` archive, click the `milkdrop` deck button again. The picker refreshes
 when files are added or removed. External edits to the playing file take
 effect when you select it again; the lab's **apply** button applies edits immediately.
 
-![The preset lab editing wavescope-nebula.milk over the running engine](assets/screenshot-lab.jpg)
+![The native preset editor with source, filename and apply/save controls](assets/screenshot-lab-native.png)
 
 ## Recording
 
