@@ -115,6 +115,7 @@ floor, e^-6dt decay). Same music, same numbers, both apps.
 | `←` | previous |
 | `E` | cycle engine (WaveScope → GPU → projectM) |
 | `G` | GPU shader engine |
+| `F3` | preset browser: search, favorites, and favorites-only shuffle |
 | `P` | cycle trace palette |
 | `N` | palettes + shuffle panel (include list, 3-stop editor) |
 | `1 2 3 4` | source: system / mic / demo / file picker |
@@ -146,6 +147,14 @@ engine AND visual every 30 s; VJ shuffle switches on the music itself — a
 bass drop hard-cuts, a long lull morphs.
 
 ## MilkDrop: morph, lab, VJ
+
+Click the projectM/MILK preset picker or press **F3** for the native preset
+browser. Search filters filenames as you type; double-click a result or choose
+**Play preset** to preview it while rendering continues. **Add favorite** saves
+the selected preset, **Favorites only** filters the list, and **Shuffle favorites
+in this library** limits timed shuffle and projectM automatic choices to that
+library's favorites. An empty pool holds the current visual. Bundled favorites
+survive moving a portable folder; external libraries use their full paths.
 
 Under the projectM engine the deck grows a **MORPH** row: a target dropdown
 (`shuffle`, or any preset in the library), a 0.5–10 s blend slider, and a

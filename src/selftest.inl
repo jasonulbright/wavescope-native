@@ -436,6 +436,31 @@ static int RunSelfTest(App* v) {
         out(L"projectm: engine failed to start -> FAIL"); rc = 1;
     } else {
         for (int i = 0; i < 60; i++) { pump(); v->Render(); }
+        // Real native browser: filtering, persisted identity, and shuffle pool.
+        v->OpenPresetBrowser();
+        SetDlgItemTextW(v->presetDialog, IDC_PRESET_QUERY, L"NEBULA");
+        bool browserPass = v->browserPaths.size() == 1 &&
+            v->browserPaths[0].find(L"nebula") != std::wstring::npos;
+        v->PresetBrowserCommand(IDC_PRESET_FAVORITE, BN_CLICKED);
+        v->presetFavorites.shuffleOnly = true;
+        int favoritePick = v->RandomPresetOther();
+        browserPass &= favoritePick >= 0 && v->IsPresetFavorite(v->pmHost.presetPaths[favoritePick]);
+        v->pmHost.LoadPreset(favoritePick, false);
+        browserPass &= v->RandomPresetOther() == -1; // one favorite: hold, don't escape the pool
+        SetDlgItemTextW(v->presetDialog, IDC_PRESET_QUERY, L"no such preset 937462");
+        browserPass &= v->browserPaths.empty() && !IsWindowEnabled(GetDlgItem(v->presetDialog, IDOK));
+        wchar_t favoriteTemp[MAX_PATH], favoriteRoot[MAX_PATH];
+        GetTempPathW(MAX_PATH, favoriteRoot); GetTempFileNameW(favoriteRoot, L"wsf", 0, favoriteTemp);
+        v->presetFavorites.Save(favoriteTemp);
+        PresetFavorites restored; restored.Load(favoriteTemp);
+        browserPass &= restored.keys == v->presetFavorites.keys && restored.shuffleOnly;
+        DeleteFileW(favoriteTemp);
+        browserPass &= WsPresetKey(L"C:\\old\\presets\\X.milk", L"C:\\old", L"C:\\old") ==
+                       WsPresetKey(L"D:\\new\\presets\\x.milk", L"D:\\new", L"D:\\new");
+        DestroyWindow(v->presetDialog); v->presetFavorites.keys.clear(); v->presetFavorites.shuffleOnly = false;
+        v->pmHost.LoadPreset(v->pmHost.PreferredStart(), false);
+        out(L"presets: native search, no matches, portable favorites, persisted shuffle pool -> %s", browserPass ? L"PASS" : L"FAIL");
+        if (!browserPass) rc = 1;
         float pcm[4800];
         int n = g_tap.ReadNew(v->pmCursor, pcm, 4800);
         v->pmHost.RenderEngine(pcm, n);

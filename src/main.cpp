@@ -472,6 +472,7 @@ private:
 #include "projectm_host.inl"
 #include "app_paths.inl"
 #include "preset_save.inl"
+#include "preset_favorites.inl"
 #include "shader_host.inl"
 #include "spotify.inl"
 #include "options.inl"
@@ -585,6 +586,30 @@ struct App {
     int menuPage = 0;                  // current page of the open dropdown
     bool pageFocused = false;          // jump-to-page field has keyboard focus
     std::wstring pageInput;            // digits typed into the jump-to-page field
+    PresetFavorites presetFavorites;
+    HWND presetDialog = nullptr;
+    std::vector<std::wstring> browserPaths;
+    std::wstring browserLibrary;
+    unsigned browserRevision = 0;
+    void OpenPresetBrowser();
+    void RefreshPresetBrowser();
+    void PresetBrowserCommand(int id, int code);
+    bool RouteDialogMessage(MSG* msg) {
+        return presetDialog && IsDialogMessageW(presetDialog, msg);
+    }
+    std::wstring FavoriteKey(const std::wstring& path) const {
+        return WsPresetKey(path, PmExeDir(), WsDataDir());
+    }
+    bool IsPresetFavorite(const std::wstring& path) const {
+        return presetFavorites.keys.count(FavoriteKey(path)) != 0;
+    }
+    int RandomPresetOther() const {
+        std::vector<int> pool;
+        for (int i = 0; i < pmHost.PresetCount(); ++i)
+            if (i != pmHost.PresetIndex() && (!presetFavorites.shuffleOnly || IsPresetFavorite(pmHost.presetPaths[i])))
+                pool.push_back(i);
+        return pool.empty() ? -1 : pool[rand() % pool.size()];
+    }
     int modeIdx = 0;
     int paletteIdx = 0;
     int resIdx = 0;          // index into RES_OPTS
@@ -1451,7 +1476,8 @@ struct App {
             if (shaderActive) ToggleShader();
             if (!pmActive) ToggleProjectM();
             if (pmActive && pmHost.PresetCount() > 0) {
-                pmHost.LoadPreset(rand() % pmHost.PresetCount(), false);
+                int pick = RandomPresetOther();
+                if (pick >= 0) pmHost.LoadPreset(pick, false);
                 return;
             }
             break;
@@ -1480,10 +1506,8 @@ struct App {
     // shuffle so both blend identically instead of hard-cutting.
     void MorphShuffle() {
         if (!pmActive || !pmHost.ready) return;
-        int n = pmHost.PresetCount();
-        if (n < 2) return;
-        int cur = pmHost.PresetIndex(), t;
-        do { t = rand() % n; } while (t == cur);
+        int t = RandomPresetOther();
+        if (t < 0) return;
         pmHost.MorphToPreset(t, morphSec);
     }
 
@@ -1642,6 +1666,7 @@ struct App {
     // Open dropdown `a`, starting on the page that holds its current selection
     // and clearing any prior jump-field state.
     void OpenMenu(int a) {
+        if (a == DK_PICK && pmActive) { OpenPresetBrowser(); return; }
         deckMenu = a; pageFocused = false; pageInput.clear(); menuPage = 0;
         if (!rt) return;
         float sc = UiScale(); D2D1_SIZE_F sz = rt->GetSize();
@@ -1948,7 +1973,7 @@ struct App {
             L"N              palettes + shuffle panel (edit / include)\n"
             L"1 / 2 / 3      source: system / mic / demo\n"
             L"4              open an audio file\n"
-            L"M              displays (pick a monitor)\n"
+            L"M              displays           F3   preset search / favorites\n"
             L"R              record clip -> wavescope-<time>.mp4 (H.264+AAC)\n"
             L"O              Spout output (OBS ingests \"WaveScope\")\n"
             L"B              Spotify: authorize + start playback (Premium)\n"
@@ -2152,10 +2177,8 @@ struct App {
     // (drop); 5 = a gentle morph (only projectM blends; others just switch).
     void VjHop(float blendSec) {
         if (pmActive && pmHost.ready) {
-            int n = pmHost.PresetCount();
-            if (n < 2) return;
-            int cur = pmHost.PresetIndex(), t;
-            do { t = rand() % n; } while (t == cur);
+            int t = RandomPresetOther();
+            if (t < 0) return;
             if (blendSec > 0) pmHost.MorphToPreset(t, (double)blendSec);
             else pmHost.LoadPreset(t, false);
         } else if (shaderActive) {
@@ -2741,6 +2764,7 @@ struct App {
         wi(L"engine", pmActive ? (milkMode ? 3 : 2) : (shaderActive ? 1 : 0));
         wi(L"spout", spout.on ? 1 : 0);
         WritePrivateProfileStringW(L"settings", L"milkFolder", libraryFolder.c_str(), path.c_str());
+        presetFavorites.Save(path);
         // Window placement: the pre-fullscreen placement when fullscreen.
         // Skipped once the window is destroyed (the WM_CLOSE-time save wrote
         // the real values; the exit-path save must not clobber them).
@@ -2781,6 +2805,7 @@ struct App {
         if (g_noPersist) return;
         std::wstring path = ConfigPath();
         if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+        presetFavorites.Load(path);
         int cnt = GetPrivateProfileIntW(L"palettes", L"count", 0, path.c_str());
         for (int i = 0; i < cnt && i < 64; i++) {
             wchar_t key[16]; swprintf_s(key, L"p%d", i);
@@ -2838,6 +2863,7 @@ struct App {
     // Release everything this window owns (GL hosts, D2D). The audio tap is
     // global and outlives the windows.
     void Shutdown() {
+        if (presetDialog) DestroyWindow(presetDialog);
         rec.Stop();
         spout.Stop();
         ReleaseRecOffscreen();
@@ -2858,6 +2884,7 @@ struct App {
 
 // Self-test harness (WaveScope.exe selftest): drives every engine on the demo
 // signal, dumps PNGs of what rendered, writes wavescope-selftest.log.
+#include "preset_browser.inl"
 #include "selftest.inl"
 
 // One App per display, heap-allocated so the pointers stashed in each window
@@ -3064,6 +3091,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (a->hud) a->hudActivity = a->Now();
             break;
         case VK_F2:    a->OpenOptions(); break;
+        case VK_F3:    a->OpenPresetBrowser(); break;
         case VK_F1:    a->help = !a->help; break;
         case VK_OEM_2: if (GetKeyState(VK_SHIFT) & 0x8000) a->help = !a->help; break; // '?'
         case VK_ESCAPE:
@@ -3337,6 +3365,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     for (;;) {
         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) goto done;
+            bool handled = false;
+            for (App* v : g_views) if (v->RouteDialogMessage(&msg)) { handled = true; break; }
+            if (handled) continue;
             TranslateMessage(&msg);
             DispatchMessage(&msg);
         }
