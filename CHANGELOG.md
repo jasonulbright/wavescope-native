@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- Show the status display and bottom controls for 15 seconds on launch, or
+  until the first keypress. Added an on-screen hint for finding controls, help
+  and Options. Mouse activity and open menus retain their normal behavior.
+- Fixed re-enabling the HUD after idle leaving it invisible until mouse movement.
+- Fixed preset-library rescans leaving an invalid selection after the active
+  file was removed. The lab reads the playing preset's path independently of
+  the picker and reports an unavailable file instead of indexing a removed row.
+- Failed preset loads now preserve the playing preset's label and editor source;
+  next/previous navigation skips unreadable or rejected presets.
+- Reorganized the README around first launch and app usage, refreshed screenshots,
+  and documented the next product priorities.
+
 ## 1.2.0 — 2026-09-10
 
 - Added a signed per-user Windows MSI installer with a Start menu shortcut,

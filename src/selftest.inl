@@ -173,6 +173,72 @@ static int RunSelfTest(App* v) {
     out(L"selftest: WaveScope %s", WAVESCOPE_VERSION);
     out(L"selftest: source=%s sampleRate=%u", g_tap.SourceName(), g_tap.SampleRate());
 
+    // Discoverability: no mouse movement is needed, the full 15 seconds begin
+    // at the first frame, and dismissing the preview must not eat a shortcut.
+    {
+        v->Render();
+        bool pass = v->StartupUiVisible() && v->DeckShown() && v->HudFade() == 1;
+        std::vector<uint8_t> px; int w = 0, h = 0;
+        pass &= StCaptureWindow(v->hwnd, px, w, h) &&
+            StWritePng((dir + L"selftest-startup.png").c_str(), px.data(), w, h, false);
+
+        // The launch deck must be clickable before any hover event arrives.
+        v->deckVisible = false; v->hudActivity = -3;
+        float sc = v->UiScale(); D2D1_SIZE_F sz = v->rt->GetSize();
+        D2D1_RECT_F buttons[App::DK_N]; v->DeckLayout(sz.width / sc, sz.height / sc, buttons);
+        D2D1_RECT_F helpButton = buttons[App::DK_HELP];
+        v->OnClick((int)((helpButton.left + helpButton.right) * sc * 0.5f),
+                   (int)((helpButton.top + helpButton.bottom) * sc * 0.5f));
+        pass &= v->help;
+        v->help = false;
+        v->startupUiUntil = -1;
+        v->UpdateUiVisibility(100); // simulate a slow startup before the first frame
+        v->UpdateUiVisibility(114.99f);
+        pass &= v->StartupUiVisible() && v->DeckShown() && v->HudFade() == 1;
+        v->UpdateUiVisibility(115);
+        pass &= !v->StartupUiVisible() && !v->DeckShown() && v->HudFade() == 0;
+        v->UpdateUiVisibility(200);
+        pass &= !v->StartupUiVisible(); // expiry never starts another preview
+
+        int mode = v->modeIdx;
+        v->startupUiUntil = -1; // key delivered even before the first frame
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_RIGHT, 0);
+        v->UpdateUiVisibility(v->Now());
+        pass &= !v->StartupUiVisible() && !v->DeckShown() && v->modeIdx != mode;
+        v->modeIdx = mode;
+        v->startupUiUntil = -1; v->UpdateUiVisibility(v->Now());
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_F1, 0);
+        pass &= v->help && !v->StartupUiVisible() && !v->DeckShown();
+        v->help = false;
+        v->startupUiUntil = -1; v->UpdateUiVisibility(v->Now());
+        SendMessageW(v->hwnd, WM_KEYDOWN, 'H', 0);
+        pass &= !v->hud && v->HudFade() == 0 && !v->StartupUiVisible();
+        SendMessageW(v->hwnd, WM_KEYDOWN, 'H', 0);
+        bool hudPass = v->hud && v->HudFade() == 1;
+        out(L"gui: re-enabling the HUD after idle makes it visible -> %s", hudPass ? L"PASS" : L"FAIL");
+        if (!hudPass) rc = 1;
+        v->hudActivity = -3;
+
+        // Menus and recent mouse activity outlive the launch timer. Expiring
+        // just the hint must invalidate the GL cache even with the deck shown.
+        v->startupUiUntil = -1; v->UpdateUiVisibility(100);
+        v->OpenMenu(App::DK_RES);
+        v->UpdateUiVisibility(115);
+        pass &= v->DeckShown() && v->deckMenu == App::DK_RES;
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+        v->startupUiUntil = -1; v->UpdateUiVisibility(100);
+        v->deckVisible = true; v->deckActivity = 114; v->hud = false;
+        RECT client; GetClientRect(v->hwnd, &client);
+        v->BuildOverlay(client.right, client.bottom, L"fixed", L"");
+        v->UpdateUiVisibility(115);
+        pass &= v->DeckShown() && v->BuildOverlay(client.right, client.bottom, L"fixed", L"");
+        v->UpdateUiVisibility(118);
+        pass &= !v->DeckShown();
+        v->hud = true; v->deckVisible = false; v->deckActivity = 0; v->olSig.clear();
+        out(L"gui: launch controls, 15-second timeout, first-key actions, overlay expiry -> %s", pass ? L"PASS" : L"FAIL");
+        if (!pass) rc = 1;
+    }
+
     // Small-window layout and modal input regressions, independent of a GPU.
     {
         bool pass = true;
@@ -553,6 +619,44 @@ static int RunSelfTest(App* v) {
         g_paths = savedPaths;
         out(L"lab: Save As refuses overwrite and preserves original bytes -> %s", savePass ? L"PASS" : L"FAIL");
         if (!savePass) rc = 1;
+
+        // A watched library can shrink while its last preset is active. The
+        // lab must not index the removed row, or silently edit its replacement.
+        GUID reloadGuid; CoCreateGuid(&reloadGuid);
+        wchar_t reloadId[40]; StringFromGUID2(reloadGuid, reloadId, 40);
+        std::wstring reloadDir = std::wstring(tempRoot) + L"WaveScope-reload-" + reloadId;
+        std::string presetText = App::WideToUtf8(original);
+        bool reloadPass = WsSaveNewPreset(reloadDir, L"a.milk", presetText) == ERROR_SUCCESS &&
+            WsSaveNewPreset(reloadDir, L"b.milk", presetText) == ERROR_SUCCESS;
+        if (reloadPass) {
+            v->pmHost.SetPresetFolder(reloadDir.c_str()); v->pmHost.LoadPreset(1, false);
+            reloadPass &= v->pmHost.PresetIndex() == 1;
+            reloadPass &= DeleteFileW((reloadDir + L"\\b.milk").c_str()) != FALSE;
+            reloadPass &= WaitForSingleObject(v->pmHost.presetWatch, 2000) == WAIT_OBJECT_0;
+            v->pmHost.PollReload();
+            bool detached = v->pmHost.PresetCount() == 1 && v->pmHost.PresetIndex() == -1;
+            reloadPass &= detached;
+            // Avoid dereferencing the known stale index in an unfixed build.
+            if (detached) reloadPass &= v->pmHost.CurrentPresetText().empty();
+            v->pmHost.NextPreset(1);
+            reloadPass &= v->pmHost.PresetIndex() == 0 && !v->pmHost.CurrentPresetText().empty();
+        }
+        out(L"projectm: removing the active preset detaches it safely -> %s", reloadPass ? L"PASS" : L"FAIL");
+        if (!reloadPass) rc = 1;
+        bool rejectPass = WsSaveNewPreset(reloadDir, L"bad.milk", "[preset00]\nper_frame_1=zoom = 1 +* ;\n") == ERROR_SUCCESS;
+        rejectPass &= WsSaveNewPreset(reloadDir, L"c.milk", presetText) == ERROR_SUCCESS;
+        v->pmHost.SetPresetFolder(reloadDir.c_str()); v->pmHost.LoadPreset(0, false);
+        v->pmHost.LoadPreset(v->pmHost.PresetIndexByName(L"bad.milk"), false);
+        rejectPass &= v->pmHost.loadFailed && v->pmHost.curName == L"a.milk" && v->pmHost.PresetIndex() == 0;
+        v->pmHost.NextPreset(1);
+        rejectPass &= !v->pmHost.loadFailed && v->pmHost.curName == L"c.milk" && v->pmHost.PresetIndex() == 2;
+        out(L"projectm: rejected preset preserves selection; navigation skips it -> %s", rejectPass ? L"PASS" : L"FAIL");
+        if (!rejectPass) rc = 1;
+        v->EnterProjectM(false);
+        DeleteFileW((reloadDir + L"\\a.milk").c_str());
+        DeleteFileW((reloadDir + L"\\b.milk").c_str());
+        DeleteFileW((reloadDir + L"\\bad.milk").c_str());
+        DeleteFileW((reloadDir + L"\\c.milk").c_str()); RemoveDirectoryW(reloadDir.c_str());
         std::wstring wtext = v->pmHost.CurrentPresetText();
         int u8n = WideCharToMultiByte(CP_UTF8, 0, wtext.data(), (int)wtext.size(), nullptr, 0, nullptr, nullptr);
         std::string valid((size_t)(u8n > 0 ? u8n : 0), '\0');
