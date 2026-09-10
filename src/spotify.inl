@@ -266,7 +266,7 @@ struct SpotifyClient {
     SRWLOCK npLock = SRWLOCK_INIT;
     std::wstring npText;
 
-    std::wstring IniPath() const { return PmExeDir() + L"wavescope.ini"; }
+    std::wstring IniPath() const { return WsDataDir() + L"wavescope.ini"; }
 
     std::string Bearer() {
         AcquireSRWLockShared(&tokLock);

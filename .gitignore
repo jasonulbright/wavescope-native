@@ -21,3 +21,4 @@ dist/
 .qa/
 presets/user/
 *.res
+.wix/

@@ -1,6 +1,6 @@
 // Clip recording: hotkey R captures the active engine's render target
-// (pre-UI) plus the analysed audio into wavescope-<timestamp>.mp4 beside the
-// exe. Media Foundation SinkWriter, hardware H.264 where available + AAC —
+// (pre-UI) plus the analysed audio into wavescope-<timestamp>.mp4 in the
+// edition's recordings folder. Media Foundation SinkWriter, hardware H.264 where available + AAC —
 // zero new dependencies. Video frames arrive bottom-up BGRA from the render
 // thread through a small drop-oldest queue; a worker thread owns the writer.
 // Audio is pulled on the worker from the same AudioTap ring the analysis
@@ -41,14 +41,15 @@ struct Recorder {
             std::lock_guard<std::mutex> g(m_qLock);
             m_queue.clear();
         }
-        // wavescope-YYYYMMDD-HHMMSS.mp4 beside the exe.
+        // Unique filenames even when multiple windows start rapid takes.
         SYSTEMTIME st; GetLocalTime(&st);
         wchar_t name[96];
         static std::atomic<unsigned> take{0};
         _snwprintf_s(name, _TRUNCATE, L"wavescope-%04d%02d%02d-%02d%02d%02d-%03d-%lu-%u.mp4",
                      st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
                      st.wMilliseconds, GetCurrentProcessId(), take++);
-        m_path = PmExeDir() + name;
+        if (!WsEnsureDirectory(WsRecordingsDir())) return false;
+        m_path = WsRecordingsDir() + name;
         QueryPerformanceCounter(&m_t0);
         m_active = true;
         m_ok = false;

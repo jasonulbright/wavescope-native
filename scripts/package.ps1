@@ -7,7 +7,7 @@ $versionText = Get-Content -LiteralPath "$repo\src\version.h" -Raw
 if ($versionText -notmatch '#define WAVESCOPE_VERSION L"(\d+\.\d+\.\d+)"') { throw 'Invalid release version' }
 $version = $Matches[1]
 $dist = [IO.Path]::GetFullPath((Join-Path $repo 'dist'))
-$name = "WaveScope-v$version-win64"
+$name = "WaveScope-v$version-portable-win64"
 $stage = [IO.Path]::GetFullPath((Join-Path $dist $name))
 if ((Split-Path -Parent $stage) -ne $dist) { throw 'Staging path escaped dist' }
 foreach ($path in @($dist, $stage)) {
@@ -56,13 +56,11 @@ if (!$FinalizeSigned) {
 }
 if (!(Test-Path -LiteralPath "$stage\WaveScope.exe")) { throw 'Staged executable is missing' }
 if (Test-Path -LiteralPath "$stage\wavescope.ini") { throw 'User settings must never ship in a release' }
+if (Test-Path -LiteralPath "$stage\installed.flag") { throw 'Installed-edition marker must never ship in the portable ZIP' }
 if ($StageOnly) { Write-Output "Staged $stage"; exit 0 }
 if ($FinalizeSigned) { & "$PSScriptRoot\verify-signatures.ps1" -Directory $stage }
 $zip = Join-Path $dist "$name.zip"
 Compress-Archive -LiteralPath $stage -DestinationPath $zip -Force
-$stream = [IO.File]::OpenRead($zip)
-$sha256 = [Security.Cryptography.SHA256]::Create()
-try { $hash = [BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
-finally { $stream.Dispose(); $sha256.Dispose() }
-[IO.File]::WriteAllText("$zip.sha256", "$hash  $name.zip`n", [Text.Encoding]::ASCII)
+& "$PSScriptRoot\build-installer.ps1" -Stage $stage -Version $version
+& "$PSScriptRoot\write-release-checksums.ps1"
 Write-Output "Packaged $zip"

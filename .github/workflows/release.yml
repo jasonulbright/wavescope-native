@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to build (for example v1.1.1)
+        description: Existing version tag to build (for example v1.2.0)
         required: true
         type: string
 permissions:
@@ -62,7 +62,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: unsigned-release
-          path: dist/WaveScope-v${{ steps.version.outputs.version }}-win64/
+          path: dist/WaveScope-v${{ steps.version.outputs.version }}-portable-win64/
           if-no-files-found: error
           retention-days: 7
   sign:
@@ -81,7 +81,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: unsigned-release
-          path: dist/WaveScope-v${{ needs.build.outputs.version }}-win64/
+          path: dist/WaveScope-v${{ needs.build.outputs.version }}-portable-win64/
       - name: Azure login using the release environment federation
         uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3
         with:
@@ -95,9 +95,9 @@ jobs:
           signing-account-name: signalridgelabs
           certificate-profile-name: SRL-Public
           files: |
-            ${{ github.workspace }}\dist\WaveScope-v${{ needs.build.outputs.version }}-win64\WaveScope.exe
-            ${{ github.workspace }}\dist\WaveScope-v${{ needs.build.outputs.version }}-win64\projectM-4.dll
-            ${{ github.workspace }}\dist\WaveScope-v${{ needs.build.outputs.version }}-win64\projectM-4-playlist.dll
+            ${{ github.workspace }}\dist\WaveScope-v${{ needs.build.outputs.version }}-portable-win64\WaveScope.exe
+            ${{ github.workspace }}\dist\WaveScope-v${{ needs.build.outputs.version }}-portable-win64\projectM-4.dll
+            ${{ github.workspace }}\dist\WaveScope-v${{ needs.build.outputs.version }}-portable-win64\projectM-4-playlist.dll
           file-digest: SHA256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
@@ -105,15 +105,39 @@ jobs:
           exclude-managed-identity-credential: true
           exclude-workload-identity-credential: true
           exclude-azure-cli-credential: false
-      - name: Verify signer and timestamp, then package and hash
+      - name: Verify payload signatures and build both packages
         shell: pwsh
         run: ./scripts/package.ps1 -FinalizeSigned
+      - name: Sign the MSI installer
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: signalridgelabs
+          certificate-profile-name: SRL-Public
+          files: ${{ github.workspace }}\dist\WaveScope-v${{ needs.build.outputs.version }}-installer-win64.msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-managed-identity-credential: true
+          exclude-workload-identity-credential: true
+          exclude-azure-cli-credential: false
+      - name: Verify signed installer and write final checksums
+        shell: pwsh
+        run: |
+          ./scripts/verify-signatures.ps1 -Directory dist/WaveScope-v${{ needs.build.outputs.version }}-portable-win64 -Installer dist/WaveScope-v${{ needs.build.outputs.version }}-installer-win64.msi
+          ./scripts/write-release-checksums.ps1
+      - name: Test signed installer lifecycle
+        shell: pwsh
+        run: ./scripts/test-installer.ps1 -Installer dist/WaveScope-v${{ needs.build.outputs.version }}-installer-win64.msi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: signed-release
           path: |
-            dist/*.zip
-            dist/*.sha256
+            dist/WaveScope-v${{ needs.build.outputs.version }}-portable-win64.zip
+            dist/WaveScope-v${{ needs.build.outputs.version }}-portable-win64.zip.sha256
+            dist/WaveScope-v${{ needs.build.outputs.version }}-installer-win64.msi
+            dist/WaveScope-v${{ needs.build.outputs.version }}-installer-win64.msi.sha256
           if-no-files-found: error
           retention-days: 30
   draft:

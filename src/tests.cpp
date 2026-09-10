@@ -19,6 +19,8 @@
 #include <shellapi.h>
 static std::wstring g_testDir;
 static std::wstring PmExeDir() { return g_testDir; }
+#include "app_paths.inl"
+#include "preset_save.inl"
 #include "spotify.inl"
 
 template <typename T> static void SafeRelease(T** p) {
@@ -227,11 +229,14 @@ static void TestModeRegistry() {
     CHECK(flash == 5, "flash modes=%d want 5", flash);
 }
 
+#include "storage_tests.inl"
+
 int main() {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     TestSpotifyProtocol();
     TestSpotifyCallback();
     TestSpotifyConfig();
+    TestStorage();
     TestFftImpulse();
     TestFftSine();
     TestFftParseval();

@@ -1,0 +1,64 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="WaveScope" Manufacturer="Signal Ridge Labs" Version="$(var.Version)"
+           UpgradeCode="3ED028CA-4AB1-4D7F-A726-A6AA1B299423" Scope="perUser" Language="1033">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of WaveScope is already installed."
+                  Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <SummaryInformation Description="WaveScope music visualizer — Windows x64 installer" />
+    <!-- MSI's WindowsBuild property is compatibility-shimmed to 9600 on
+         modern Windows. Read the actual build before checking our API floor. -->
+    <Property Id="WINDOWSBUILDNUMBER">
+      <RegistrySearch Id="WindowsBuildNumber" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR (VersionNT64 AND WINDOWSBUILDNUMBER &gt;= 15063)"
+            Message="WaveScope requires 64-bit Windows 10 version 1703 or newer." />
+    <Icon Id="WaveScopeIcon" SourceFile="$(var.Repo)\src\WaveScope.ico" />
+    <Property Id="ARPPRODUCTICON" Value="WaveScopeIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/jasonulbright/wavescope-native" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/jasonulbright/wavescope-native/issues" />
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" After="CostFinalize" />
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKCU" Key="Software\Signal Ridge Labs\WaveScope\Installer"
+                      Name="InstallFolder" Type="raw" Bitness="always64" />
+    </Property>
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="UserProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="WaveScope" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="WaveScope">
+        <Component Id="StartMenuShortcut" Guid="*">
+          <Shortcut Id="StartWaveScope" Name="WaveScope" Target="[INSTALLFOLDER]WaveScope.exe"
+                    WorkingDirectory="INSTALLFOLDER" Icon="WaveScopeIcon" />
+          <RemoveFolder Id="RemoveStartMenuFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\Signal Ridge Labs\WaveScope\Installer"
+                         Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="InstalledMarker" Guid="AF03D913-7790-42A7-AC8F-5E0F92651802">
+        <File Source="$(var.Repo)\installer\installed.flag" />
+        <RegistryValue Root="HKCU" Key="Software\Signal Ridge Labs\WaveScope\Installer"
+                       Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+        <RegistryValue Root="HKCU" Key="Software\Signal Ridge Labs\WaveScope\Installer"
+                       Name="InstallFolder" Type="string" Value="[INSTALLFOLDER]" />
+        <RemoveFolder Id="RemoveApplicationFolder" On="uninstall" />
+        <RemoveFolder Id="RemoveEmptyProgramsFolder" Directory="UserProgramsFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+    <Feature Id="Complete" Title="WaveScope" Level="1">
+      <ComponentGroupRef Id="ReleaseFiles" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="InstalledMarker" />
+    </Feature>
+    <ui:WixUI Id="WixUI_Minimal" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT"
+              Value="Open WaveScope from the Start menu. Settings and saved presets are kept in your local app data; recordings are saved in Videos\WaveScope. Uninstalling preserves those files." />
+  </Package>
+</Wix>

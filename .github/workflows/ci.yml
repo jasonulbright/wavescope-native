@@ -31,3 +31,8 @@ jobs:
         # Hosted Windows runners do not provide the OpenGL 3.3 desktop needed
         # by the graphics selftest. Run package.bat locally before release.
         run: ./scripts/package.ps1 -SkipBuild -SkipRenderTest -StageOnly
+      - name: Build and test MSI installer
+        shell: pwsh
+        run: |
+          ./scripts/build-installer.ps1
+          ./scripts/test-installer.ps1
