@@ -90,7 +90,7 @@ struct ProjectMHost {
         // clickable over the GL engine (child coords == parent client coords).
         switch (m) {
         case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP:
-        case WM_RBUTTONUP: case WM_LBUTTONDBLCLK: {
+        case WM_RBUTTONUP: case WM_LBUTTONDBLCLK: case WM_MOUSEWHEEL: {
             HWND p = GetParent(h); if (p) PostMessageW(p, m, w, l); return 0;
         }
         }

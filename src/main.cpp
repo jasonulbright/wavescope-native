@@ -12,8 +12,8 @@
 // All 34 WaveScope modes are ported (viz_modes.inl) across six palettes, and
 // the real MilkDrop engine runs via projectM (projectm_host.inl).
 
-// Single source of truth for the release version; package.bat parses it.
-#define WAVESCOPE_VERSION L"1.1.0"
+// Shared release version for the GUI, Windows resources and package workflow.
+#include "version.h"
 
 #include "resource.h"
 
@@ -76,7 +76,7 @@ public:
 
     void Stop() {
         m_quit = true;
-        if (m_thread) { WaitForSingleObject(m_thread, 2000); CloseHandle(m_thread); m_thread = nullptr; }
+        if (m_thread) { WaitForSingleObject(m_thread, INFINITE); CloseHandle(m_thread); m_thread = nullptr; }
     }
 
     UINT32 SampleRate() const { return m_sampleRate; }
@@ -113,7 +113,7 @@ public:
     // synthesized at real-time pace instead.
     int ReadNew(TapCursor& c, float* out, int maxn) {
         if (m_source.load() == SRC_DEMO) {
-            double sr = (double)(m_sampleRate ? m_sampleRate : 48000);
+            double sr = (double)(m_sampleRate.load() ? m_sampleRate.load() : 48000);
             double nowMs = (double)GetTickCount64();
             if (c.demoMs == 0.0) c.demoMs = nowMs;
             int n = (int)((nowMs - c.demoMs) * sr / 1000.0);
@@ -146,7 +146,7 @@ public:
         if (m_source.load() == SRC_DEMO) {
             // Synthesize a coherent window ending at the current time. The
             // detune is sampled once per window so phase stays clean.
-            float sr = (float)(m_sampleRate ? m_sampleRate : 48000);
+            float sr = (float)(m_sampleRate.load() ? m_sampleRate.load() : 48000);
             float cents[5]; DemoDetune(now, cents);
             for (int i = 0; i < 2048; i++)
                 window[i] = DemoSynth((double)now - (double)(2048 - i) / sr, cents);
@@ -161,7 +161,7 @@ public:
         }
         // The Web-Audio-analyser-matched math lives in analysis.inl
         // (tests.cpp asserts it against the contract).
-        AnalyzeWindow(m_an, window, (float)(m_sampleRate ? m_sampleRate : 48000), now, f);
+        AnalyzeWindow(m_an, window, (float)(m_sampleRate.load() ? m_sampleRate.load() : 48000), now, f);
     }
 
 private:
@@ -456,7 +456,7 @@ private:
     SRWLOCK m_lock = SRWLOCK_INIT;
     float m_ring[RING] = {};
     uint64_t m_writeIdx = 0;
-    UINT32 m_sampleRate = 48000;
+    std::atomic<UINT32> m_sampleRate{48000};
     AnalysisState m_an;
     wchar_t m_filePath[MAX_PATH] = {};
 };
@@ -472,6 +472,7 @@ private:
 #include "projectm_host.inl"
 #include "shader_host.inl"
 #include "spotify.inl"
+#include "options.inl"
 #include "record.inl"
 #include "spout_out.inl"
 
@@ -578,6 +579,7 @@ struct App {
     // Paged dropdown state: a picker with more columns than MENU_MAXCOLS (only
     // the 551-preset MILK library today) turns into a fixed-size page with a
     // ‹ N / M › pager and a jump-to-page field. Small menus ignore all of this.
+    int palOffset = 0;
     int menuPage = 0;                  // current page of the open dropdown
     bool pageFocused = false;          // jump-to-page field has keyboard focus
     std::wstring pageInput;            // digits typed into the jump-to-page field
@@ -608,6 +610,7 @@ struct App {
     // running preset up and shows the engine's message. Save As writes the
     // text into presets\user\ and points the picker at it.
     bool labPanel = false;
+    bool labIgnoreOpenChar = false;
     std::wstring labText;           // editor buffer (\n-separated source)
     size_t labCaret = 0;            // caret position (index into labText)
     int labScroll = 0;              // first visible editor line
@@ -731,6 +734,11 @@ struct App {
         }
         if (deckMenu >= 0)   // paged dropdown: page + jump-field state
             sig += L"|M" + std::to_wstring(menuPage) + std::to_wstring(pageFocused) + pageInput;
+        sig += L"|L" + std::to_wstring(labPanel);
+        if (labPanel) sig += labText + L"|" + std::to_wstring(labCaret) + L"|" +
+            std::to_wstring(labScroll) + L"|" + std::to_wstring(labFocus) + L"|" +
+            labSaveName + L"|" + labStatus + std::to_wstring(labStatusErr);
+        sig += L"|SP" + std::to_wstring(g_spotify.StatusVisible()) + g_spotify.Status() + std::to_wstring(g_spotify.busy.load()) + L"|" + std::to_wstring(palOffset);
         if (olSig == sig) return false; // unchanged — reuse the cached texture
         olSig = sig;
 
@@ -1125,7 +1133,7 @@ struct App {
            DK_TRACE, DK_SHUF, DK_RES,                    // selectors
            DK_LAB,                                        // preset lab button (projectM only)
            DK_MORPHT, DK_MORPH,                          // morph deck (projectM engine only)
-           DK_CALM, DK_PALS, DK_DISP, DK_REC, DK_FULL, DK_HELP, // actions (right cluster)
+           DK_CALM, DK_PALS, DK_DISP, DK_REC, DK_FULL, DK_OPTIONS, DK_HELP, // actions (right cluster)
            DK_N };
     // The morph group carries a slider between its two buttons (target ▾ and
     // the morph button); this is the width reserved for the track + value
@@ -1202,6 +1210,7 @@ struct App {
         case DK_DISP:  return std::wstring(L"displays") + CH;
         case DK_REC:   return rec.Active() ? L"stop rec (R)" : L"rec (R)";
         case DK_FULL:  return L"fullscreen (F)";
+        case DK_OPTIONS: return L"options (F2)";
         case DK_HELP:  return L"?";
         default: return L"";
         }
@@ -1228,6 +1237,9 @@ struct App {
         float nat[DK_N];
         for (int i = 0; i < DK_N; i++) {
             float w = (float)DeckLabel(i).length() * charW + padX;
+            // Bound long preset names so the picker cannot push controls offscreen.
+            if (i == DK_PICK && w > avail - DescWidth(DK_PREV) - 2 * (minBtn + gap))
+                w = avail - DescWidth(DK_PREV) - 2 * (minBtn + gap);
             nat[i] = DeckHidden(i) ? 0.0f : (w < minBtn ? minBtn : w);
         }
 
@@ -1262,7 +1274,13 @@ struct App {
         // Right cluster: same row as the last left row if it fits, else a new row.
         int lastRow = leftRows - 1;
         bool rightNewRow = (rowEnd[lastRow] + groupGap + rNat > x1);
-        int totalRows = leftRows + (rightNewRow ? 1 : 0);
+        int rightRows = 1; float rightUsed = 0;
+        for (int i = DK_CALM; i <= DK_HELP; i++) if (!DeckHidden(i)) {
+            float add = nat[i] + (rightUsed > 0 ? gap : 0);
+            if (rightUsed > 0 && rightUsed + add > avail) { rightRows++; rightUsed = 0; add = nat[i]; }
+            rightUsed += add;
+        }
+        int totalRows = leftRows + (rightNewRow ? rightRows : 0);
         float totalH = totalRows * rowH + (totalRows - 1) * rowGap;
         float yTop = H - bottom - totalH;
 
@@ -1287,12 +1305,13 @@ struct App {
             }
             bxRow[rr] = bx;
         }
-        // Place the right cluster, right-aligned.
+        // Flow action buttons across additional rows when the window is narrow.
         int rr = rightNewRow ? leftRows : lastRow;
-        float y = yTop + rr * (rowH + rowGap);
-        float bx = x1 - rNat;
+        float bx = rightNewRow && rightRows > 1 ? x0 : x1 - rNat;
         for (int i = DK_CALM; i <= DK_HELP; i++) {
             if (DeckHidden(i)) { out[i] = dead; continue; }
+            if (bx > x0 && bx + nat[i] > x1 + 0.01f) { rr++; bx = x0; }
+            float y = yTop + rr * (rowH + rowGap);
             out[i] = D2D1::RectF(bx, y, bx + nat[i], y + rowH);
             bx += nat[i] + gap;
         }
@@ -1366,7 +1385,7 @@ struct App {
         case DK_MIC:   g_tap.SetSource(AudioTap::SRC_MIC); break;
         case DK_DEMO:  g_tap.SetSource(AudioTap::SRC_DEMO); break;
         case DK_FILE:  OpenFile(); break;
-        case DK_SPOT:  g_spotify.OneButton(); break;
+        case DK_SPOT:  SpotifyButton(); break;
         case DK_PREV:  CyclePick(-1); break;
         case DK_NEXT:  CyclePick(1); break;
         case DK_WAVE:  if (pmActive) ToggleProjectM(); if (shaderActive) ToggleShader(); OpenMenu(DK_PICK); break;
@@ -1387,13 +1406,21 @@ struct App {
         case DK_PALS:  OpenPalettePanel(); break;
         case DK_REC:   ToggleRecord(); break;
         case DK_FULL:  ToggleFullscreen(); break;
+        case DK_OPTIONS: OpenOptions(); break;
         case DK_HELP:  help = !help; break;
         }
     }
 
-    // Auto-DJ: hop to a random engine that is ready to go, then a random
-    // visual inside it (web behavior). Engines that fail to start fall back
-    // to the built-in modes.
+    void OpenOptions() {
+        DialogBoxParamW(inst, MAKEINTRESOURCEW(IDD_OPTIONS), hwnd, OptionsProc, 0);
+        hudActivity = Now(); olSig.clear();
+    }
+    void SpotifyButton() {
+        if (!SpValidClientId(g_spotify.clientId)) OpenOptions();
+        else { g_spotify.OneButton(); hudActivity = Now(); }
+    }
+
+    // Auto-DJ hops between available engines and visuals.
     void DjHop() {
         switch (rand() % 3) {
         case 1:   // GPU shaders
@@ -1749,7 +1776,7 @@ struct App {
                 return;
             }
         }
-        if (palPanel) return;  // panel is modal
+        if (palPanel || labPanel || help) return;  // panels are modal
         RECT rc; GetClientRect(hwnd, &rc);
         int hit = DeckHitTest(mx, my);
         if (my > (int)(rc.bottom / sc) - 175 || hit >= 0 || deckMenu >= 0) { deckVisible = true; deckActivity = Now(); }
@@ -1757,6 +1784,7 @@ struct App {
     }
 
     void OnClick(int pxx, int pxy) {
+        if (help) { help = false; return; }
         float sc = UiScale();
         int mx = (int)(pxx / sc), my = (int)(pxy / sc);
         if (LabClick(mx, my)) return;
@@ -1772,6 +1800,7 @@ struct App {
             if (mx >= track.left - 4 && mx <= track.right + 4 &&
                 my >= track.top && my <= track.bottom) {
                 morphDragging = true;
+                SetCapture(hwnd);
                 morphSec = MorphSecFromX((float)mx, track);
                 deckActivity = Now();
                 return;
@@ -1814,6 +1843,11 @@ struct App {
                 if (nl == std::wstring::npos) break;
                 pos = nl + 1;
             }
+        }
+        std::wstring spStatus = g_spotify.Status();
+        if (!spStatus.empty() && g_spotify.StatusVisible()) {
+            p.Rect(16, p.H() - 240, p.W() - 32, 48, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.95f);
+            p.Text(24, p.H() - 234, p.W() - 48, 40, spStatus.c_str(), 1, 1, 1, 0.9f);
         }
         if (labPanel) { DrawLabPanel(p); return; }       // modal: hides deck
         if (palPanel) { DrawPalettePanel(p); return; }  // modal: hides deck
@@ -1890,10 +1924,10 @@ struct App {
             L"O              Spout output (OBS ingests \"WaveScope\")\n"
             L"B              Spotify: authorize + start playback (Premium)\n"
             L"S              shuffle timer (off / 15s / 30s / 1m / 5m / DJ / VJ)\n"
-            L"C              calm mode (photosensitive-safe)\n"
+            L"C              calm mode (reduced motion and beat intensity)\n"
             L"L              preset lab (edit the active .milk)   RES \x25BE on deck\n"
             L"F              fullscreen        H   HUD (auto-fades on idle)\n"
-            L"T              always on top     F1 / ?   this help\n"
+            L"T              always on top     F1 / ?   help    F2   options\n"
             L"ESC            close panel / menu / fullscreen, then quit\n"
             L"\n"
             L"Launch: WaveScope.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
@@ -2170,7 +2204,7 @@ struct App {
         for (int i = 0; i < n && c < 64; i++) if (palInclude[i]) pool[c++] = i;
         return c ? pool[rand() % c] : paletteIdx;
     }
-    void OpenPalettePanel() { palPanel = !palPanel; nameFocused = false; EnsurePalInclude(); }
+    void OpenPalettePanel() { palPanel = !palPanel; nameFocused = false; palOffset = 0; deckMenu = -1; EnsurePalInclude(); }
 
     // Open the standard picker for one of the new-palette color stops.
     void PickStop(int k) {
@@ -2186,6 +2220,7 @@ struct App {
         }
     }
     void AddNewPalette() {
+        if (customPalettes.size() >= 64) return;
         CustomPalette cp; cp.n = 3;
         for (int k = 0; k < 3; k++) for (int c = 0; c < 3; c++) cp.stops[k][c] = newStops[k][c];
         if (!newName.empty()) cp.name = newName;
@@ -2201,7 +2236,7 @@ struct App {
         if (!palPanel || !nameFocused) return;
         if (c == 8) { if (!newName.empty()) newName.pop_back(); }
         else if (c == 13) AddNewPalette();
-        else if (c >= 32 && newName.size() < 22) newName += c;
+        else if (c >= 32 && c != L'|' && newName.size() < 22) newName += c;
     }
     // Jump-to-page field: digits only, Enter jumps to that page (1-based,
     // clamped), Backspace edits, and both Enter and a committed jump un-focus.
@@ -2225,17 +2260,20 @@ struct App {
     }
 
     struct PalRects {
-        D2D1_RECT_F card, close, master, swatch[3], preview, nameBox, addBtn;
+        D2D1_RECT_F card, close, master, swatch[3], preview, nameBox, addBtn, prev, next;
         D2D1_RECT_F row[64];
         int rows = 0;
         float dividerY = 0, newHeadY = 0, newDescY = 0;
     };
     void PalLayout(float W, float H, PalRects& r) {
         EnsurePalInclude();
-        int n = PaletteCount(); if (n > 64) n = 64;
-        r.rows = n;
+        int n = PaletteCount();
         const float pw = 462, pad = 28, rowH = 26;
-        float ph = 344 + n * rowH;
+        int visible = Clampi((int)((H - 24 - 374) / rowH), 1, 64);
+        if (visible > n) visible = n;
+        palOffset = Clampi(palOffset, 0, n - visible);
+        r.rows = visible;
+        float ph = 374 + visible * rowH;
         float px = (W - pw) * 0.5f, py = (H - ph) * 0.5f;
         if (py < 12) py = 12;
         r.card = D2D1::RectF(px, py, px + pw, py + ph);
@@ -2243,7 +2281,10 @@ struct App {
         r.close = D2D1::RectF(px + pw - pad - 44, py + 16, px + pw - pad, py + 38);
         r.master = D2D1::RectF(x, py + 64, x + 20, py + 84);
         float y = py + 132;
-        for (int i = 0; i < n; i++) { r.row[i] = D2D1::RectF(x, y, px + pw - pad, y + rowH - 4); y += rowH; }
+        for (int i = 0; i < visible; i++) { r.row[i] = D2D1::RectF(x, y, px + pw - pad, y + rowH - 4); y += rowH; }
+        r.prev = D2D1::RectF(x, y + 2, x + 60, y + 26);
+        r.next = D2D1::RectF(px + pw - pad - 60, y + 2, px + pw - pad, y + 26);
+        y += 30;
         r.dividerY = y + 12; y += 26;
         r.newHeadY = y; y += 30;
         r.newDescY = y; y += 42;
@@ -2289,13 +2330,18 @@ struct App {
                0.60f, 0.63f, 0.66f, 0.92f);
         for (int i = 0; i < r.rows; i++) {
             const D2D1_RECT_F& row = r.row[i];
-            DrawCheck(p, D2D1::RectF(row.left, row.top + 1, row.left + 18, row.top + 19), palInclude[i] != 0);
-            DrawGrad(p, row.left + 30, row.top + 2, 190, 17, PaletteFnFor(i));
-            bool active = (i == paletteIdx);
-            p.Text(row.left + 232, row.top - 1, 200, 22, PalNameFor(i),
+            int idx = palOffset + i;
+            DrawCheck(p, D2D1::RectF(row.left, row.top + 1, row.left + 18, row.top + 19), palInclude[idx] != 0);
+            DrawGrad(p, row.left + 30, row.top + 2, 170, 17, PaletteFnFor(idx));
+            bool active = (idx == paletteIdx);
+            p.Text(row.left + 212, row.top - 1, 194, 22, PalNameFor(idx),
                    active ? UI_SOFT_R : 1.0f, active ? UI_SOFT_G : 1.0f,
                    active ? UI_SOFT_B : 1.0f, active ? 1.0f : 0.70f);
         }
+        std::wstring range = std::to_wstring(palOffset + 1) + L" - " + std::to_wstring(palOffset + r.rows) + L" / " + std::to_wstring(PaletteCount());
+        p.Text(r.prev.left, r.prev.top, 60, 24, L"< prev", 1, 1, 1, 0.8f, true);
+        p.Text(r.next.left, r.next.top, 60, 24, L"next >", 1, 1, 1, 0.8f, true);
+        p.Text(r.prev.right, r.prev.top, r.next.left - r.prev.right, 24, range.c_str(), 1, 1, 1, 0.6f, true);
         p.Rect(cx, r.dividerY, r.card.right - 28 - cx, 1, 0.25f, 0.28f, 0.32f, 0.8f);
         p.Text(cx, r.newHeadY, 300, 24, L"New palette", 0.92f, 0.93f, 0.94f, 0.96f);
         p.Text(cx, r.newDescY, 406, 40,
@@ -2334,9 +2380,12 @@ struct App {
         PalRects r; PalLayout(sz.width / sc, sz.height / sc, r);
         if (In(r.close, mx, my)) { palPanel = false; return true; }
         if (In(r.master, mx, my)) { shufflePalettes = !shufflePalettes; SaveConfig(); return true; }
+        if (In(r.prev, mx, my)) { palOffset = Clampi(palOffset - r.rows, 0, PaletteCount() - 1); return true; }
+        if (In(r.next, mx, my)) { palOffset = Clampi(palOffset + r.rows, 0, PaletteCount() - 1); return true; }
         for (int i = 0; i < r.rows; i++) if (In(r.row[i], mx, my)) {
-            if (mx <= r.row[i].left + 24) { palInclude[i] = !palInclude[i]; SaveConfig(); }
-            else paletteIdx = i;
+            int idx = palOffset + i;
+            if (mx <= r.row[i].left + 24) { palInclude[idx] = !palInclude[idx]; SaveConfig(); }
+            else paletteIdx = idx;
             return true;
         }
         for (int k = 0; k < 3; k++) if (In(r.swatch[k], mx, my)) { PickStop(k); return true; }
@@ -2390,6 +2439,7 @@ struct App {
     // L / deck button: toggle the lab. Seeds from the active preset on open.
     void OpenLab() {
         if (!pmActive || !pmHost.ready) return;   // lab is a projectM feature
+        deckMenu = -1; palPanel = false; help = false;
         labPanel = !labPanel;
         if (labPanel) SeedLab();
         else labFocus = LF_NONE;
@@ -2537,6 +2587,7 @@ struct App {
         }
     }
     void LabChar(wchar_t c) {
+        if (labIgnoreOpenChar) { labIgnoreOpenChar = false; if (c == L'l' || c == L'L') return; }
         if (labFocus == LF_NAME) {
             if (c >= 32 && c != 127 && labSaveName.size() < 80) labSaveName += c;
         } else if (labFocus == LF_EDITOR) {
@@ -2692,6 +2743,7 @@ struct App {
     }
 
     void LoadConfig() {
+        if (g_noPersist) return;
         std::wstring path = ConfigPath();
         if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
         int cnt = GetPrivateProfileIntW(L"palettes", L"count", 0, path.c_str());
@@ -2857,6 +2909,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (!a) return DefWindowProc(hwnd, msg, wp, lp);
 
     switch (msg) {
+    case WM_GETMINMAXINFO: {
+        UINT dpi = GetDpiForWindow(hwnd); if (!dpi) dpi = 96;
+        RECT bounds = {0, 0, MulDiv(760, dpi, 96), MulDiv(560, dpi, 96)};
+        AdjustWindowRectExForDpi(&bounds, (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE), FALSE, 0, dpi);
+        auto mm = reinterpret_cast<MINMAXINFO*>(lp);
+        mm->ptMinTrackSize = {bounds.right - bounds.left, bounds.bottom - bounds.top};
+        return 0;
+    }
     case WM_SIZE:
         if (a->rt) a->rt->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
         if (a->pmHost.ready) a->pmHost.Resize(LOWORD(lp), HIWORD(lp));
@@ -2885,6 +2945,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONUP:
         // End a morph-slider drag and persist the length once (not per move).
+        if (a->morphDragging) { a->morphDragging = false; ReleaseCapture(); a->SaveConfig(); }
+        return 0;
+    case WM_CAPTURECHANGED:
         if (a->morphDragging) { a->morphDragging = false; a->SaveConfig(); }
         return 0;
     case WM_KEYDOWN:
@@ -2894,8 +2957,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // While the palette-name field has focus, letters belong to the name
         // (WM_CHAR), not to shortcuts — typing "Sunset" must not cycle the
         // shuffle timer or launch the Spotify flow. ESC still closes.
-        if (a->palPanel && a->nameFocused) {
-            if (wp == VK_ESCAPE) { a->nameFocused = false; }
+        if (a->palPanel) {
+            if (wp == VK_ESCAPE) {
+                if (a->nameFocused) a->nameFocused = false; else a->palPanel = false;
+            } else if (!a->nameFocused && (wp == VK_UP || wp == VK_DOWN)) {
+                a->palOffset = Clampi(a->palOffset + (wp == VK_UP ? -1 : 1), 0, a->PaletteCount() - 1);
+            }
+            return 0;
+        }
+        if (a->help) {
+            if (wp == VK_ESCAPE || wp == VK_F1 || wp == VK_OEM_2) a->help = false;
             return 0;
         }
         // While the jump-to-page field has focus, keys drive that field (the
@@ -2937,7 +3008,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case '4':      a->OpenFile(); break;
         case 'S':      a->CycleShuffle(); break;
         case 'C':      a->SetCalm(!a->calm); break;
-        case 'L':      a->OpenLab(); break;
+        case 'L':      a->OpenLab(); a->labIgnoreOpenChar = a->labPanel; break;
         case 'M':      // web parity: M = displays
             a->deckVisible = true; a->deckActivity = a->Now();
             if (a->deckMenu == App::DK_DISP) a->deckMenu = -1; else a->OpenMenu(App::DK_DISP);
@@ -2947,9 +3018,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case 'R':      a->ToggleRecord(); break;      // web parity: R = record
         case 'T':      a->SetAlwaysOnTop(!a->alwaysOnTop); break;
         case 'O':      a->ToggleSpout(); break;       // Spout output (OBS)
-        case 'B':      g_spotify.OneButton(); break;  // Spotify: authorize + play
+        case 'B':      a->SpotifyButton(); break;  // Spotify: authorize + play
         case 'F':      a->ToggleFullscreen(); break;
         case 'H':      a->hud = !a->hud; break;
+        case VK_F2:    a->OpenOptions(); break;
         case VK_F1:    a->help = !a->help; break;
         case VK_OEM_2: if (GetKeyState(VK_SHIFT) & 0x8000) a->help = !a->help; break; // '?'
         case VK_ESCAPE:
@@ -2971,6 +3043,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSEWHEEL:
         if (a->labPanel) a->LabScrollBy((short)HIWORD(wp) > 0 ? -3 : 3);
+        else if (a->palPanel) a->palOffset = Clampi(a->palOffset + ((short)HIWORD(wp) > 0 ? -3 : 3), 0, a->PaletteCount() - 1);
         return 0;
     case WM_TRAY:
         if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {
@@ -3145,7 +3218,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     if (opts.installStartup) { SetAutoStart(true);  return 0; }
     if (opts.removeStartup)  { SetAutoStart(false); return 0; }
 
-    g_spotify.LoadToken(); // restore the stored Spotify sign-in
+    if (!opts.selftest) g_spotify.LoadToken(); // restore the stored Spotify sign-in
 
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = WndProc;
@@ -3201,6 +3274,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
         TrayRemove();
         for (App* v : g_views) { v->Shutdown(); delete v; }
         g_views.clear();
+        g_tap.Stop();
+        CoUninitialize();
         return rc;
     }
 
@@ -3245,5 +3320,6 @@ done:
     for (App* v : g_views) { v->Shutdown(); delete v; }
     g_views.clear();
     g_tap.Stop();
+    CoUninitialize();
     return 0;
 }

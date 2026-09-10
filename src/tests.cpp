@@ -15,6 +15,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <string>
+#include <shellapi.h>
+static std::wstring g_testDir;
+static std::wstring PmExeDir() { return g_testDir; }
+#include "spotify.inl"
 
 template <typename T> static void SafeRelease(T** p) {
     if (*p) { (*p)->Release(); *p = nullptr; }
@@ -33,6 +38,7 @@ static int g_failures = 0;
     } } while (0)
 
 static bool Near(float a, float b, float eps) { return fabsf(a - b) <= eps; }
+#include "security_tests.inl"
 
 // ---------------------------------------------------------------- FFT
 
@@ -222,6 +228,10 @@ static void TestModeRegistry() {
 }
 
 int main() {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    TestSpotifyProtocol();
+    TestSpotifyCallback();
+    TestSpotifyConfig();
     TestFftImpulse();
     TestFftSine();
     TestFftParseval();
@@ -231,6 +241,7 @@ int main() {
     TestBinLog();
     TestPalettes();
     TestModeRegistry();
+    winrt::uninit_apartment();
     if (g_failures == 0) {
         printf("tests: ALL PASS\n");
         return 0;

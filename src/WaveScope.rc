@@ -1,2 +1,50 @@
 #include "resource.h"
+#include <windows.h>
+#include "version.h"
 IDI_APP_ICON ICON "WaveScope.ico"
+
+1 VERSIONINFO
+FILEVERSION WAVESCOPE_VERSION_NUMBER
+PRODUCTVERSION WAVESCOPE_VERSION_NUMBER
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Signal Ridge Labs\0"
+            VALUE "FileDescription", "WaveScope audio visualizer\0"
+            VALUE "FileVersion", WAVESCOPE_VERSION_STRING
+            VALUE "InternalName", "WaveScope\0"
+            VALUE "OriginalFilename", "WaveScope.exe\0"
+            VALUE "ProductName", "WaveScope\0"
+            VALUE "ProductVersion", WAVESCOPE_VERSION_STRING
+            VALUE "LegalCopyright", "Copyright 2026 Signal Ridge Labs\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+IDD_OPTIONS DIALOGEX 0, 0, 330, 213
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "WaveScope Options - Spotify"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Spotify playback control (optional)", -1, 12, 12, 300, 14
+    LTEXT "System audio works without a Spotify account. To control playback, create an app at developer.spotify.com/dashboard. Playback control requires Premium.", -1, 12, 32, 304, 32
+    LTEXT "Register this exact redirect URI in your Spotify app:", -1, 12, 69, 304, 12
+    EDITTEXT IDC_SP_REDIRECT, 12, 83, 304, 15, ES_READONLY | ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT "Client &ID (32 characters; no client secret needed):", -1, 12, 107, 304, 12
+    EDITTEXT IDC_SP_CLIENT, 12, 121, 304, 16, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT "", IDC_SP_STATUS, 12, 146, 304, 28
+    PUSHBUTTON "&Disconnect", IDC_SP_DISCONNECT, 12, 185, 69, 17
+    DEFPUSHBUTTON "&Save", IDOK, 174, 185, 67, 17
+    PUSHBUTTON "Cancel", IDCANCEL, 249, 185, 67, 17
+END

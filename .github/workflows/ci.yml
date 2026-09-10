@@ -1,0 +1,33 @@
+name: Build and test
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: projectM-visualizer/projectm
+          ref: 149bfc43963e54e397ccdb42f27019d22b659098
+          path: .deps/projectm
+          submodules: recursive
+          persist-credentials: false
+      - name: Build pinned projectM
+        shell: pwsh
+        run: ./scripts/build-projectm.ps1
+      - name: Build and run unit and adversarial tests
+        shell: cmd
+        run: build.bat
+      - name: Verify portable staging
+        shell: pwsh
+        # Hosted Windows runners do not provide the OpenGL 3.3 desktop needed
+        # by the graphics selftest. Run package.bat locally before release.
+        run: ./scripts/package.ps1 -SkipBuild -SkipRenderTest -StageOnly
