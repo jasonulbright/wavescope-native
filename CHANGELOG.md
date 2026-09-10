@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added saved pinned controls, Tab/arrow/Enter navigation on the deck and
+  menus, and an accessible native Controls window (F4).
 - Added a native preset browser (F3) with live search, saved favorites,
   favorites-only filtering and a favorites-only shuffle pool.
 - Show the status display and bottom controls for 15 seconds on launch, or

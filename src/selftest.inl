@@ -279,6 +279,33 @@ static int RunSelfTest(App* v) {
     }
 
     // --- built-in D2D modes ---
+    {
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_TAB, 0);
+        bool pass = v->DeckShown() && v->deckKeyboard && v->deckFocus >= 0;
+        int oldMode = v->modeIdx;
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_RIGHT, 0);
+        pass &= v->modeIdx == oldMode; // focused arrows navigate, not switch visuals
+        v->deckFocus = App::DK_PIN;
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_RETURN, 0);
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+        v->UpdateUiVisibility(v->Now() + 60);
+        pass &= v->deckPinned && v->DeckShown() && !v->deckKeyboard;
+        v->OpenControls();
+        pass &= v->controlsDialog && GetDlgItem(v->controlsDialog, IDC_CONTROL_BASE + App::DK_SYS);
+        pass &= GetNextDlgTabItem(v->controlsDialog, GetDlgItem(v->controlsDialog, IDC_CONTROLS_PIN), FALSE) != nullptr;
+        std::vector<uint8_t> pixels; int w = 0, h = 0;
+        if (StCaptureWindow(v->controlsDialog, pixels, w, h))
+            StWritePng((dir + L"selftest-controls.png").c_str(), pixels.data(), w, h, false);
+        CheckDlgButton(v->controlsDialog, IDC_CONTROLS_PIN, BST_UNCHECKED);
+        v->ControlsCommand(IDC_CONTROLS_PIN, BN_CLICKED);
+        DestroyWindow(v->controlsDialog);
+        v->deckVisible = false; v->deckKeyboard = false;
+        pass &= !v->deckPinned && !v->DeckShown();
+        out(L"controls: keyboard navigation, persistent visibility, native tab controls -> %s", pass ? L"PASS" : L"FAIL");
+        if (!pass) rc = 1;
+    }
+
+    // --- built-in D2D modes ---
     if (v->pmActive) v->ToggleProjectM();
     if (v->shaderActive) v->ToggleShader();
     // Sweep every mode for a few frames first: exercises each one's state
