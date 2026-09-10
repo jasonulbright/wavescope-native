@@ -66,6 +66,6 @@ struct D2DPainter : UIPainter {
               float r, float g, float b, float a, bool center, bool tiny) override {
         br->SetColor(D2D1::ColorF(r, g, b, a));
         IDWriteTextFormat* f = (tiny && tinyFont) ? tinyFont : (center ? centerFont : leftFont);
-        rt->DrawTextW(s, (UINT32)wcslen(s), f, D2D1::RectF(x, y, x + w, y + h), br);
+        rt->DrawTextW(s, (UINT32)wcslen(s), f, D2D1::RectF(x, y, x + w, y + h), br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 };

@@ -10,6 +10,7 @@
 #include <mutex>
 
 struct Recorder {
+    ~Recorder() { Stop(); }
     // ---- render-thread interface ----
 
     bool Active() const { return m_active.load(); }
@@ -26,11 +27,13 @@ struct Recorder {
     // if the sink writer can't start (no encoder, bad path).
     bool Start(int w, int h, UINT32 sampleRate, AudioTap* tap) {
         if (m_active.load()) return true;
+        Stop(); // reap a worker that failed or stopped after a size change
         m_w = w & ~1; m_h = h & ~1;
         if (m_w < 64 || m_h < 64) return false;
         m_rate = (sampleRate == 44100 || sampleRate == 48000) ? sampleRate : 48000;
         m_tap = tap;
         m_quit = false;
+        m_sizeBroke = false;
         m_videoSamples = 0;
         m_audioSamples = 0;
         m_dropNote = 0;
@@ -40,9 +43,11 @@ struct Recorder {
         }
         // wavescope-YYYYMMDD-HHMMSS.mp4 beside the exe.
         SYSTEMTIME st; GetLocalTime(&st);
-        wchar_t name[64];
-        _snwprintf_s(name, _TRUNCATE, L"wavescope-%04d%02d%02d-%02d%02d%02d.mp4",
-                     st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        wchar_t name[96];
+        static std::atomic<unsigned> take{0};
+        _snwprintf_s(name, _TRUNCATE, L"wavescope-%04d%02d%02d-%02d%02d%02d-%03d-%lu-%u.mp4",
+                     st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond,
+                     st.wMilliseconds, GetCurrentProcessId(), take++);
         m_path = PmExeDir() + name;
         QueryPerformanceCounter(&m_t0);
         m_active = true;
@@ -55,7 +60,7 @@ struct Recorder {
     }
 
     void Stop() {
-        if (!m_active.exchange(false)) return;
+        m_active = false;
         m_quit = true;
         if (m_worker.joinable()) m_worker.join();
     }

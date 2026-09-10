@@ -18,6 +18,11 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include "spotify_helpers.inl"
+#include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Data.Json.h>
+#pragma comment(lib, "windowsapp.lib")
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "bcrypt.lib")
@@ -27,15 +32,15 @@
 // ---- small encoding / crypto helpers (single TU, so file-static is fine) ----
 
 static std::wstring SpWiden(const std::string& s) {
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
-    std::wstring w(n > 0 ? n - 1 : 0, 0);
-    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &w[0], n);
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w(n > 0 ? n : 0, 0);
+    if (n > 0) MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), (int)s.size(), w.data(), n);
     return w;
 }
 static std::string SpNarrow(const std::wstring& s) {
-    int n = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    std::string a(n > 0 ? n - 1 : 0, 0);
-    if (n > 0) WideCharToMultiByte(CP_UTF8, 0, s.c_str(), -1, &a[0], n, nullptr, nullptr);
+    int n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, s.data(), (int)s.size(), nullptr, 0, nullptr, nullptr);
+    std::string a(n > 0 ? n : 0, 0);
+    if (n > 0) WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, s.data(), (int)s.size(), a.data(), n, nullptr, nullptr);
     return a;
 }
 
@@ -49,50 +54,24 @@ static std::string SpUrlEncode(const std::string& s) {
     }
     return o;
 }
-static std::string SpUrlDecode(const std::string& s) {
-    auto hv = [](char c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; };
-    std::string o;
-    for (size_t i = 0; i < s.size(); i++) {
-        if (s[i] == '%' && i + 2 < s.size()) { o += (char)((hv(s[i + 1]) << 4) | hv(s[i + 2])); i += 2; }
-        else if (s[i] == '+') o += ' ';
-        else o += s[i];
-    }
-    return o;
-}
-
-static std::string SpBase64Url(const BYTE* p, size_t n) {
-    static const char* t = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    std::string o; int val = 0, bits = -6;
-    for (size_t i = 0; i < n; i++) {
-        val = (val << 8) + p[i]; bits += 8;
-        while (bits >= 0) { o += t[(val >> bits) & 0x3F]; bits -= 6; }
-    }
-    if (bits > -6) o += t[((val << 8) >> (bits + 8)) & 0x3F];
-    return o; // URL-safe, unpadded (RFC 7636)
-}
 static std::string SpHex(const BYTE* p, size_t n) {
     static const char* h = "0123456789abcdef"; std::string o;
     for (size_t i = 0; i < n; i++) { o += h[p[i] >> 4]; o += h[p[i] & 15]; }
     return o;
 }
-static std::string SpUnHex(const std::string& s) {
-    auto hv = [](char c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; };
-    std::string o;
-    for (size_t i = 0; i + 1 < s.size(); i += 2) o += (char)((hv(s[i]) << 4) | hv(s[i + 1]));
-    return o;
-}
-
-static void SpSha256(const std::string& in, BYTE out[32]) {
+static bool SpSha256(const std::string& in, BYTE out[32]) {
     BCRYPT_ALG_HANDLE alg = nullptr; BCRYPT_HASH_HANDLE h = nullptr;
-    BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
-    BCryptCreateHash(alg, &h, nullptr, 0, nullptr, 0, 0);
-    BCryptHashData(h, (PUCHAR)in.data(), (ULONG)in.size(), 0);
-    BCryptFinishHash(h, out, 32, 0);
-    BCryptDestroyHash(h); BCryptCloseAlgorithmProvider(alg, 0);
+    bool ok = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) >= 0 &&
+              BCryptCreateHash(alg, &h, nullptr, 0, nullptr, 0, 0) >= 0 &&
+              BCryptHashData(h, (PUCHAR)in.data(), (ULONG)in.size(), 0) >= 0 &&
+              BCryptFinishHash(h, out, 32, 0) >= 0;
+    if (h) BCryptDestroyHash(h);
+    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    return ok;
 }
 static std::string SpRandToken() {
     BYTE b[48] = {};
-    BCryptGenRandom(nullptr, b, sizeof(b), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (BCryptGenRandom(nullptr, b, sizeof(b), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) return {};
     return SpBase64Url(b, sizeof(b)); // 64 chars, within the 43-128 range
 }
 
@@ -107,7 +86,7 @@ static SpResp SpHttps(const wchar_t* host, const wchar_t* verb, const wchar_t* p
                               WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!s) return r;
     // Bounded waits so a hung request can't stall app shutdown behind a join.
-    WinHttpSetTimeouts(s, 5000, 10000, 15000, 15000);
+    WinHttpSetTimeouts(s, 3000, 5000, 5000, 5000);
     // Don't follow redirects: Spotify's token/API endpoints answer in place,
     // so an unexpected redirect should fail loudly rather than re-send the
     // Authorization header somewhere else.
@@ -129,12 +108,16 @@ static SpResp SpHttps(const wchar_t* host, const wchar_t* verb, const wchar_t* p
             WinHttpQueryHeaders(q, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                                 WINHTTP_HEADER_NAME_BY_INDEX, &sc, &l, WINHTTP_NO_HEADER_INDEX);
             r.status = sc;
-            DWORD avail;
-            do {
-                avail = 0; WinHttpQueryDataAvailable(q, &avail);
-                if (avail) { std::string ch(avail, 0); DWORD rd = 0;
-                    WinHttpReadData(q, &ch[0], avail, &rd); ch.resize(rd); r.body += ch; }
-            } while (avail > 0);
+            const ULONGLONG deadline = GetTickCount64() + 15000;
+            char chunk[8192]; DWORD rd = 0;
+            for (;;) {
+                if (GetTickCount64() >= deadline || !WinHttpReadData(q, chunk, sizeof(chunk), &rd)) {
+                    r = {}; break;
+                }
+                if (!rd) break;
+                if (r.body.size() + rd > 1024 * 1024) { r = {}; break; }
+                r.body.append(chunk, rd);
+            }
         }
     }
     if (q) WinHttpCloseHandle(q);
@@ -143,57 +126,67 @@ static SpResp SpHttps(const wchar_t* host, const wchar_t* verb, const wchar_t* p
     return r;
 }
 
-// Extract a JSON string/scalar value for `key` (flat scan; good enough here).
-static std::string SpJson(const std::string& j, const char* key) {
-    std::string k = std::string("\"") + key + "\"";
-    size_t p = j.find(k); if (p == std::string::npos) return "";
-    p = j.find(':', p + k.size()); if (p == std::string::npos) return "";
-    p++; while (p < j.size() && (j[p] == ' ' || j[p] == '\t')) p++;
-    if (p < j.size() && j[p] == '"') {
-        p++; std::string out;
-        while (p < j.size() && j[p] != '"') {
-            if (j[p] == '\\' && p + 1 < j.size()) { out += j[p + 1]; p += 2; }
-            else out += j[p++];
-        }
-        return out;
-    }
-    size_t e = p;
-    while (e < j.size() && j[e] != ',' && j[e] != '}' && j[e] != ']') e++;
-    return j.substr(p, e - p);
+// Use the OS JSON parser: nested objects, key ordering and Unicode escapes
+// are part of the API contract, and must not be parsed by substring searches.
+static std::string SpJson(const std::string& body, const char* key) {
+    using namespace winrt::Windows::Data::Json;
+    try {
+        JsonObject obj;
+        if (!JsonObject::TryParse(SpWiden(body), obj)) return {};
+        auto value = obj.GetNamedValue(SpWiden(key), nullptr);
+        if (!value) return {};
+        if (value.ValueType() == JsonValueType::String) return SpNarrow(std::wstring(value.GetString()));
+        return {}; // OAuth token fields must be strings, never null/scalars
+    } catch (const winrt::hresult_error&) { return {}; }
 }
-static std::string SpFirstDeviceId(const std::string& j) {
-    size_t d = j.find("\"devices\"");
-    size_t p = j.find("\"id\"", d == std::string::npos ? 0 : d);
-    if (p == std::string::npos) return "";
-    std::string id = SpJson(j.substr(p), "id");
-    return id == "null" ? "" : id;
+static std::string SpFirstDeviceId(const std::string& body) {
+    using namespace winrt::Windows::Data::Json;
+    try {
+        auto obj = JsonObject::Parse(SpWiden(body));
+        auto devices = obj.GetNamedArray(L"devices");
+        std::string fallback;
+        for (auto value : devices) {
+            auto dev = value.GetObject();
+            if (dev.GetNamedBoolean(L"is_restricted", false)) continue;
+            auto id = dev.GetNamedString(L"id", L"");
+            if (id.empty()) continue;
+            std::string candidate = SpNarrow(std::wstring(id));
+            if (dev.GetNamedBoolean(L"is_active", false)) return candidate;
+            if (fallback.empty()) fallback = candidate;
+        }
+        return fallback;
+    } catch (const winrt::hresult_error&) { return {}; }
+}
+static std::wstring SpTrackText(const std::string& body) {
+    using namespace winrt::Windows::Data::Json;
+    try {
+        auto obj = JsonObject::Parse(SpWiden(body));
+        if (!obj.GetNamedBoolean(L"is_playing", false)) return {};
+        auto item = obj.GetNamedObject(L"item");
+        std::wstring track(item.GetNamedString(L"name"));
+        auto artists = item.GetNamedArray(L"artists", nullptr);
+        if (artists && artists.Size()) {
+            std::wstring artist(artists.GetObjectAt(0).GetNamedString(L"name", L""));
+            if (!artist.empty()) track += L" \x2014 " + artist;
+        }
+        return track;
+    } catch (const winrt::hresult_error&) { return {}; }
 }
 
 // Extract a query parameter from the request LINE only (never the headers),
 // so only the request line's own code/state is read.
-static std::string SpQueryParam(const std::string& req, const char* key) {
-    size_t eol = req.find("\r\n");
-    std::string line = req.substr(0, eol == std::string::npos ? req.size() : eol);
-    std::string k = std::string(key) + "=";
-    size_t p = line.find('?'); if (p == std::string::npos) return "";
-    p = line.find(k, p); if (p == std::string::npos) return "";
-    p += k.size(); size_t e = p;
-    while (e < line.size() && line[e] != '&' && line[e] != ' ' && line[e] != '#') e++;
-    return SpUrlDecode(line.substr(p, e - p));
-}
-
 // Bind the sign-in return listener on 127.0.0.1:8888. Must succeed BEFORE the
 // browser opens: an already-signed-in account returns instantly, and the
 // listener has to be there to catch it. Bound so only this process holds the
 // port for the duration of the flow.
-static SOCKET SpListen() {
+static SOCKET SpListen(unsigned short port = 8888) {
     SOCKET srv = socket(AF_INET, SOCK_STREAM, 0);
     if (srv == INVALID_SOCKET) return srv;
     BOOL yes = TRUE;
     setsockopt(srv, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (char*)&yes, sizeof(yes));
     sockaddr_in a = {};
     a.sin_family = AF_INET;
-    a.sin_port = htons(8888);
+    a.sin_port = htons(port);
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);   // this machine only, never 0.0.0.0
     if (bind(srv, (sockaddr*)&a, sizeof(a)) != 0 || listen(srv, 1) != 0) {
         closesocket(srv);
@@ -216,10 +209,20 @@ static bool SpWaitForCode(SOCKET srv, std::string& code, const std::string& expe
         if (select(0, &rs, nullptr, nullptr, &tv) <= 0) continue;
         SOCKET cS = accept(srv, nullptr, nullptr);
         if (cS == INVALID_SOCKET) continue;
-        char buf[4096];
-        int n = recv(cS, buf, sizeof(buf) - 1, 0);
-        if (n > 0) {
-            std::string req(buf, (size_t)n);
+        DWORD sendTimeout = 500;
+        setsockopt(cS, SOL_SOCKET, SO_SNDTIMEO, (char*)&sendTimeout, sizeof(sendTimeout));
+        std::string req;
+        ULONGLONG requestDeadline = GetTickCount64() + 2000;
+        while (req.find("\r\n") == std::string::npos && req.size() < 4096 &&
+               !quit.load() && GetTickCount64() < requestDeadline) {
+            fd_set incoming; FD_ZERO(&incoming); FD_SET(cS, &incoming);
+            timeval wait = {0, 100000};
+            if (select(0, &incoming, nullptr, nullptr, &wait) <= 0) continue;
+            char buf[1024]; int n = recv(cS, buf, sizeof(buf), 0);
+            if (n <= 0) break;
+            req.append(buf, n);
+        }
+        if (req.size() <= 4096 && !quit.load()) {
             std::string c = SpQueryParam(req, "code");
             if (!c.empty() && SpQueryParam(req, "state") == expectState) {
                 code = c;
@@ -245,13 +248,17 @@ static bool SpWaitForCode(SOCKET srv, std::string& code, const std::string& expe
 static SRWLOCK g_iniLock = SRWLOCK_INIT;
 
 struct SpotifyClient {
-    std::string clientId = "89df5ee986864e558952ba356aa968ea";
+    ~SpotifyClient() { Shutdown(); }
+    std::string clientId; // public OAuth client ID supplied in Options
     std::string redirect = "http://127.0.0.1:8888/callback";
     std::string scopes   = "user-modify-playback-state user-read-playback-state user-read-currently-playing";
     std::string accessToken, refreshToken;   // guarded by tokLock
     std::atomic<bool> busy{ false };
     std::atomic<bool> quitFlag{ false };
     std::thread worker;
+    std::mutex sessionLock; // serialize refresh rotation, sign-in, and config changes
+    std::wstring status;
+    std::atomic<ULONGLONG> statusAt{0};
     // Now-playing readout for the HUD, refreshed by a poller thread.
     std::thread poller;
     std::atomic<bool> pollerOn{ false };
@@ -294,13 +301,19 @@ struct SpotifyClient {
         ReleaseSRWLockShared(&tokLock);
         if (rt.empty()) return;
         std::string blob = Protect(rt, true);
+        if (blob.empty()) { Notify(L"Windows could not encrypt the Spotify login. It was not saved."); return; }
         std::wstring hx = SpWiden(SpHex((const BYTE*)blob.data(), blob.size()));
         AcquireSRWLockExclusive(&g_iniLock);
-        WritePrivateProfileStringW(L"spotify", L"refresh", hx.c_str(), IniPath().c_str());
+        bool saved = WritePrivateProfileStringW(L"spotify", L"refresh", hx.c_str(), IniPath().c_str()) != 0;
         ReleaseSRWLockExclusive(&g_iniLock);
+        if (!saved) Notify(L"Could not save the Spotify login. Check that the app folder is writable.");
     }
     void LoadToken() {
         std::wstring path = IniPath();
+        wchar_t cid[128] = {};
+        GetPrivateProfileStringW(L"spotify", L"clientId", L"", cid, 128, path.c_str());
+        clientId = SpNarrow(cid);
+        if (!SpValidClientId(clientId)) { clientId.clear(); return; }
         wchar_t buf[4096];
         GetPrivateProfileStringW(L"spotify", L"refresh", L"", buf, 4096, path.c_str());
         if (buf[0]) {
@@ -310,25 +323,48 @@ struct SpotifyClient {
             ReleaseSRWLockExclusive(&tokLock);
             if (!rt.empty()) StartPoller();   // resume the HUD readout silently
         }
-        // Client ID lives in the ini (configurable, not baked in). Seed the
-        // default on first run so it's there to edit; the ini is the source of
-        // truth thereafter.
-        wchar_t cid[128];
-        GetPrivateProfileStringW(L"spotify", L"clientId", L"", cid, 128, path.c_str());
-        if (cid[0]) clientId = SpNarrow(cid);
-        else {
-            AcquireSRWLockExclusive(&g_iniLock);
-            WritePrivateProfileStringW(L"spotify", L"clientId", SpWiden(clientId).c_str(), path.c_str());
-            ReleaseSRWLockExclusive(&g_iniLock);
-        }
+
     }
 
     void Notify(const std::wstring& m) {
-        // Shutdown joins this worker; a modal box would hold the join hostage
-        // until someone clicks OK. Once quitting, stay silent.
-        if (quitFlag.load()) return;
-        MessageBoxW(nullptr, m.c_str(), L"WaveScope \x2014 Spotify",
-                    MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
+        // Never display a modal box on a worker that shutdown must join.
+        AcquireSRWLockExclusive(&npLock);
+        status = m;
+        statusAt = GetTickCount64();
+        for (wchar_t& c : status) if (c == L'\n' || c == L'\r') c = L' ';
+        ReleaseSRWLockExclusive(&npLock);
+    }
+    std::wstring Status() {
+        AcquireSRWLockShared(&npLock);
+        std::wstring s = status;
+        ReleaseSRWLockShared(&npLock);
+        return s;
+    }
+    bool StatusVisible() const { return statusAt.load() != 0 && GetTickCount64() - statusAt.load() < 15000; }
+    bool Configure(const std::string& id) {
+        if (!id.empty() && !SpValidClientId(id)) return false;
+        std::unique_lock<std::mutex> guard(sessionLock, std::try_to_lock);
+        if (!guard.owns_lock()) {
+            Notify(L"Spotify is busy. Wait for the current request, then save again.");
+            return false;
+        }
+        AcquireSRWLockExclusive(&g_iniLock);
+        bool ok = true;
+        // Changing the app or explicitly disconnecting invalidates its login.
+        if (ok && (id != clientId || id.empty()))
+            ok = WritePrivateProfileStringW(L"spotify", L"refresh", nullptr, IniPath().c_str()) != 0;
+        if (ok) ok = WritePrivateProfileStringW(L"spotify", L"clientId", SpWiden(id).c_str(), IniPath().c_str()) != 0;
+        ReleaseSRWLockExclusive(&g_iniLock);
+        if (!ok) { Notify(L"Could not save wavescope.ini. Check that the app folder is writable."); return false; }
+        if (id != clientId || id.empty()) {
+            AcquireSRWLockExclusive(&tokLock);
+            accessToken.clear(); refreshToken.clear();
+            ReleaseSRWLockExclusive(&tokLock);
+            SetNowPlaying(L"");
+        }
+        clientId = id;
+        Notify(id.empty() ? L"Spotify disconnected." : L"Client ID saved. Press B to connect.");
+        return true;
     }
 
     SpResp Player(const wchar_t* verb, const wchar_t* path, const std::string& body) {
@@ -358,9 +394,11 @@ struct SpotifyClient {
 
     bool DoSignIn() {
         std::string verifier = SpRandToken();
-        BYTE hash[32]; SpSha256(verifier, hash);
+        BYTE hash[32] = {};
+        if (verifier.empty() || !SpSha256(verifier, hash)) return false;
         std::string challenge = SpBase64Url(hash, 32);
-        std::string state = SpRandToken().substr(0, 16);
+        std::string state = SpRandToken();
+        if (state.empty()) return false;
 
         // Listener FIRST, then the browser: an already-signed-in account can
         // bounce off /authorize and return within milliseconds.
@@ -411,9 +449,7 @@ struct SpotifyClient {
 
     // ---- now-playing (HUD readout) ----
 
-    // Best-effort parse of /currently-playing: within `item`, "duration_ms"
-    // precedes the track-level "name", and the first "name" after "artists"
-    // is the artist. Flat scans, only on the trusted API response.
+    // Read the track and artist from their actual JSON objects.
     void UpdateNowPlaying() {
         SpResp r = Player(L"GET", L"/v1/me/player/currently-playing", "");
         if (r.status == 401) {
@@ -421,14 +457,7 @@ struct SpotifyClient {
             r = Player(L"GET", L"/v1/me/player/currently-playing", "");
         }
         if (r.status != 200 || r.body.empty()) { SetNowPlaying(L""); return; }
-        if (SpJson(r.body, "is_playing") != "true") { SetNowPlaying(L""); return; }
-        size_t art = r.body.find("\"artists\"");
-        std::string artist = art == std::string::npos ? "" : SpJson(r.body.substr(art), "name");
-        size_t dur = r.body.find("\"duration_ms\"", art == std::string::npos ? 0 : art);
-        std::string track = dur == std::string::npos ? "" : SpJson(r.body.substr(dur), "name");
-        if (track.empty()) { SetNowPlaying(L""); return; }
-        std::wstring w = SpWiden(track);
-        if (!artist.empty()) w += L" \x2014 " + SpWiden(artist);
+        std::wstring w = SpTrackText(r.body);
         if (w.size() > 60) { w.resize(59); w += L"\x2026"; }
         SetNowPlaying(w);
     }
@@ -438,15 +467,18 @@ struct SpotifyClient {
     void StartPoller() {
         if (pollerOn.exchange(true)) return;
         poller = std::thread([this] {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
             int tick = 0;
             while (!quitFlag.load()) {
                 if (tick == 0) {
-                    if (!Bearer().empty() || RefreshAccess()) UpdateNowPlaying();
+                    std::lock_guard<std::mutex> guard(sessionLock);
+                    if (!quitFlag.load() && (!Bearer().empty() || RefreshAccess())) UpdateNowPlaying();
                     tick = 20;           // 20 x 500 ms = 10 s cadence
                 }
                 tick--;
                 Sleep(500);
             }
+            winrt::uninit_apartment();
         });
     }
 
@@ -465,7 +497,8 @@ struct SpotifyClient {
             return false;
         }
         // Transfer to the device with play:true = select it and start playing.
-        std::string body = "{\"device_ids\":[\"" + id + "\"],\"play\":true}";
+        std::string quoted = SpNarrow(std::wstring(winrt::Windows::Data::Json::JsonValue::CreateStringValue(SpWiden(id)).Stringify()));
+        std::string body = "{\"device_ids\":[" + quoted + "],\"play\":true}";
         SpResp pr = Player(L"PUT", L"/v1/me/player", body);
         if (pr.status == 401 && RefreshAccess()) pr = Player(L"PUT", L"/v1/me/player", body);
         if (pr.status == 204 || pr.status == 202 || pr.status == 200) return true; // playing
@@ -484,8 +517,7 @@ struct SpotifyClient {
             return;
         }
         StartPoller();       // begin/continue the now-playing HUD readout
-        if (!quitFlag.load())
-            StartPlayback(); // notifies on the device/premium cases; silent on success
+        if (!quitFlag.load() && StartPlayback()) Notify(L"Spotify connected.");
     }
 
     // The one button — runs the whole flow on a worker thread so the render
@@ -493,7 +525,14 @@ struct SpotifyClient {
     void OneButton() {
         if (busy.exchange(true)) return;
         if (worker.joinable()) worker.join();   // reap the previous, finished flow
-        worker = std::thread([this] { Flow(); busy = false; });
+        worker = std::thread([this] {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            std::lock_guard<std::mutex> guard(sessionLock);
+            if (SpValidClientId(clientId)) { Notify(L"Connecting to Spotify..."); Flow(); }
+            else Notify(L"Open Options (F2) to enter your Spotify client ID.");
+            busy = false;
+            winrt::uninit_apartment();
+        });
     }
 
     // Joined at app exit so the flows can't run through CRT teardown; the

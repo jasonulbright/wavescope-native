@@ -17,3 +17,7 @@ diffs.png
 
 # Release packaging output (package.bat)
 dist/
+.deps/
+.qa/
+presets/user/
+*.res

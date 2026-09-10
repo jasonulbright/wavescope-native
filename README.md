@@ -1,15 +1,18 @@
 # WaveScope (native)
 
+[![Build and test](https://github.com/jasonulbright/wavescope-native/actions/workflows/ci.yml/badge.svg)](https://github.com/jasonulbright/wavescope-native/actions/workflows/ci.yml)
+[![Signed release](https://github.com/jasonulbright/wavescope-native/actions/workflows/release.yml/badge.svg)](https://github.com/jasonulbright/wavescope-native/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/jasonulbright/wavescope-native?label=download&color=39c5bb)](https://github.com/jasonulbright/wavescope-native/releases/latest)
+[![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4)](#get-it)
+[![MIT license](https://img.shields.io/github/license/jasonulbright/wavescope-native)](LICENSE)
+
 A music visualizer built like an instrument, and built like a classic
 Windows app: one C++ source tree, one statically linked exe, OS facilities
 everywhere they exist, and exactly two deliberate dependencies — libprojectM
 for real MilkDrop and the Spout SDK for OBS texture sharing, both pinned.
-The audit surface is this repo, Windows, and those two pins.
-
-This is the native successor to the WaveScope web app (live at
-https://wavescope.signalridgelabs.com, source at
-github.com/jasonulbright/wavescope). It matches the web app feature for
-feature — same analysis math, same 34 modes, same 17 GPU shaders, same
+This is the native successor to the [WaveScope web app](https://wavescope.signalridgelabs.com)
+([web source](https://github.com/jasonulbright/wavescope)). It shares the
+web app's analysis math, 34 modes, 17 GPU shaders,
 palettes, the same 15 `.milk` presets plus the full 551-preset classic
 MilkDrop library in original form — and adds the things only a desktop app
 can do: silent WASAPI loopback, MP4 clip recording, companion displays from
@@ -19,13 +22,19 @@ one engine, Spout output for OBS, always-on-top, tray, launch at login.
 
 ## Get it
 
-Grab `WaveScope-v<version>-win64.zip` from the repo's Releases, unzip
+Grab `WaveScope-v<version>-win64.zip` from the [latest release](https://github.com/jasonulbright/wavescope-native/releases/latest), unzip
 anywhere — USB stick included — and run `WaveScope.exe`. The zip carries
 everything: the projectM DLLs, their app-local VC++ runtime, both preset
 libraries with the texture pack, and the third-party notices. Fully
-portable: settings live in `wavescope.ini` beside the exe, nothing touches
-the registry except the opt-in launch-at-login key, and deleting the
-folder removes every trace.
+portable: settings live in `wavescope.ini` beside the exe. The app's only
+registry setting is its opt-in launch-at-login key; disable startup with
+`WaveScope.exe remove-startup` before deleting the folder if you enabled it.
+
+Requires 64-bit Windows and an OpenGL 3.3-capable graphics driver for the GPU
+and MilkDrop engines. Official ZIPs starting with **v1.1.1** contain
+timestamped signatures from **Jason Ulbright** on the app and projectM DLLs.
+Earlier releases and local builds are unsigned. Each release includes a
+SHA-256 checksum; see [download verification](docs/RELEASING.md#verify-a-download).
 
 ## Build
 
@@ -33,11 +42,12 @@ folder removes every trace.
 build.bat
 ```
 
-Requires Visual Studio 2026 (any edition) and the projectM native build at
-`C:\projects\projectm\install-native` (built there via its
-`build-native.bat`; MSVC/Ninja, shared DLL). The batch file:
+Requires Visual Studio 2022 or 2026 with C++ desktop tools and a Windows SDK.
+First [build the pinned projectM dependency](docs/RELEASING.md#build-dependency-from-the-pinned-source)
+with the included PowerShell script. Set `PMROOT` to its `install-native`
+directory; the default is `C:\projects\projectm\install-native`. The batch file:
 
-1. builds and **runs the unit tests** (`src/tests.cpp`) — a red test fails
+1. builds and **runs the unit and adversarial tests** (`src/tests.cpp`) — a red test fails
    the build;
 2. builds `WaveScope.exe` (`/MT`, no MSVC redistributable needed for the
    core app);
@@ -55,9 +65,10 @@ Renders every engine on the demo signal and asserts real output: sweeps all
 re-opens/decodes it, does a Spout roundtrip through an in-process receiver,
 sweeps a spread of the 551 classic presets through the ns-eel parser, dumps
 PNGs of what actually rendered beside the exe, writes
-`wavescope-selftest.log`, and exits nonzero on any failure. Run it after
-every change; CI-in-a-flag. Selftest never writes `wavescope.ini` — your
-engine/mode/palette survive it.
+`wavescope-selftest.log`, and exits nonzero on any failure. It also exercises
+GUI layout/input, lab redraw, morphing, VJ and recording restart regressions.
+Run it on a Windows desktop after rendering or GUI changes. Selftest never
+loads or writes personal settings or Spotify tokens.
 
 ## Package
 
@@ -66,13 +77,20 @@ under `dist\`, runs the **staged** exe's selftest as the release gate — the
 zip layout has to prove it runs standalone — and produces
 `dist\WaveScope-v<version>-win64.zip`.
 
+The packer includes only tracked preset/texture assets, excludes personal
+presets and settings, and writes a SHA-256 checksum beside the zip.
+The local build is unsigned. The [signed release workflow](docs/RELEASING.md)
+uses Azure Artifact Signing and prepares a draft for review. Its hosted
+runner runs unit tests and builds the full package; the graphics selftest
+must run on a Windows desktop with OpenGL 3.3 before release.
+
 ## The three engines
 
 | Engine | What it is |
 |---|---|
 | **WaveScope** | 34 built-in modes in five families (spectrum 9, waveform 6, particles 6, geometry 6, field 7), Direct2D, faithful ports of the web canvas math, phosphor-trail retained rendering. |
 | **GPU** | All 17 web WGSL shader modes ported 1:1 to GLSL 330 (Plasma field … Scope lines), compiled at runtime on a WGL context. Audio uniforms plus per-frame FFT (1024×R8) and waveform (2048×R8) textures with `spec()/specLog()/wav()`. |
-| **projectM / MILK** | Real MilkDrop via native libprojectM. PROJM plays the 15 bundled WaveScope presets (same files as the web app). MILK plays the **original classic library — 551 presets from the official MilkDrop distribution** (`presets-classic\`, with the shared texture pack in `textures\`) — or your own `.milk` folder (`L` to pick, hot-reloads on change). These are the true originals of the ~60 converted classics the web's Butterchurn engine ships, running on the real ns-eel VM. |
+| **projectM / MILK** | Real MilkDrop via native libprojectM. PROJM plays the 15 bundled WaveScope presets (same files as the web app). MILK plays the **original classic library — 551 presets from the official MilkDrop distribution** (`presets-classic\`, with the shared texture pack in `textures\`) — or your own `.milk` folder (click the `milkdrop` deck button again to pick; hot-reloads on change). These are the true originals of the ~60 converted classics the web's Butterchurn engine ships, running on the real ns-eel VM. |
 
 ## Sources
 
@@ -105,11 +123,14 @@ floor, e^-6dt decay). Same music, same numbers, both apps.
 | `O` | Spout output — OBS/Resolume ingest the visual as sender "WaveScope" |
 | `B` | Spotify: authorize once + start playback (Premium) |
 | `S` | shuffle timer (off / 15s / 30s / 1m / 5m / **DJ** / **VJ**) |
-| `C` | calm mode (photosensitive-safe: no burst modes, softened beat) |
+| `C` | calm mode (reduced beat intensity; excludes built-in burst modes) |
 | `L` | preset lab — edit the active preset's `.milk`, apply, save |
 | `T` | always on top |
-| `F` | fullscreen — `H` HUD — `F1` / `?` help |
+| `F` | fullscreen — `H` HUD — `F1` / `?` help — `F2` options |
 | `ESC` | close panel / menu / help / fullscreen, then quit |
+
+Calm mode reduces some built-in effects. It is not a photosensitivity safety
+guarantee; GPU shaders and MilkDrop presets can still flash.
 
 Resolution targets (AUTO / 1080 / 1440 / 4K / 8K) live in the deck's
 `RES ▾` dropdown; they drive the built-in modes' offscreen render. The GL
@@ -147,7 +168,9 @@ Foundation (no new dependencies). It captures the engine's render target
 *before* the UI, at the current render resolution (built-ins) or window
 size (GL engines), clamped to 4K — H.264 encoders stop near 4096 px a
 side, so an 8K-target take lands as a 3840-wide file instead of failing.
-Switching engine or resolution mid-take finalizes the file cleanly.
+The recording keeps its initial frame size: larger frames are cropped and
+a smaller frame ends the take. Stop recording before changing engine,
+resolution or window size to keep framing consistent.
 `● REC mm:ss` shows in the HUD.
 
 ## OBS / Spout
@@ -175,19 +198,19 @@ just that companion. `WaveScope.exe wall` boots straight into that state;
 
 ## Spotify
 
-`B` signs you in to Spotify once through your browser (no client secret; the
-client ID lives in `wavescope.ini`, yours to change) and starts playback on
-your device. The sign-in returns to a local listener on 127.0.0.1:8888,
-opened before the browser and matched to that one request; calls go over
-WinHTTP and your stored sign-in is kept for your Windows user account, so
-signing in again is rare. Playback control needs Premium (visualizing
-already-playing audio needs nothing), and the HUD shows now-playing
-(`♪ track — artist`), resumed on later launches.
+Open **Options (F2)** and enter the public **Client ID** from your own
+Spotify application in the [developer dashboard](https://developer.spotify.com/dashboard). Register
+`http://127.0.0.1:8888/callback` as its redirect URI. No bundled client ID,
+client secret or API key is shipped. Leaving the ID blank or choosing
+Disconnect clears the stored login. Changing the ID also clears tokens
+issued to the previous app.
 
-The bundled client ID is this project's registered Spotify app. If new
-sign-ins are refused (Spotify limits development-mode apps to allowlisted
-users), create your own free app at developer.spotify.com and put its
-client ID in `wavescope.ini`.
+Press **B** (or the deck's Spotify button) to authorize with PKCE and resume
+playback on an available device, preferring the active one. Playback control
+requires Premium and your Spotify app must allow your account to sign in.
+System loopback visualizes already-playing Spotify audio without any API setup.
+The refresh token is encrypted with Windows DPAPI for the current user;
+never distribute your personal `wavescope.ini` with a release.
 
 ## Persistence
 
@@ -220,19 +243,25 @@ minimize hides to tray (and rendering fully stops while hidden).
   preset scan/sort/hot-reload.
 - `src/spotify.inl` — the Spotify sign-in flow, local return listener,
   WinHTTP calls, stored login, now-playing poller.
+- `src/spotify_helpers.inl` — callback parsing, encoding and Windows JSON helpers.
 - `src/record.inl` — MP4 clip recorder (Media Foundation SinkWriter).
 - `src/spout_out.inl` — Spout output wrapper (`third_party/spout`).
 - `src/ui_paint.inl` — the abstract UI painter (one UI, every engine).
 - `src/selftest.inl` — the `selftest` harness.
-- `src/tests.cpp` — unit tests for the pure math (run by `build.bat`).
+- `src/tests.cpp` and `src/security_tests.inl` — math, registry and adversarial
+  protocol/configuration tests (run by `build.bat`).
+- `src/options.inl` — native Spotify settings dialog.
+- `src/version.h` — release version shared by the app and Windows resources.
 
 ## Dependencies
 
 OS facilities everywhere they exist (WinHTTP, Media Foundation, WASAPI,
-D2D/DirectWrite/WIC, WGL, and the OS secret-store APIs), two vendored dependencies (libprojectM
-4.x, LGPL-2.1, pinned, built from `C:\projects\projectm`; the Spout SDK's
-DX subset, BSD-2-Clause, pinned in-tree), and small hand-rolled code only
-where it is boring and testable (ini, flat JSON reads, base64url).
+D2D/DirectWrite/WIC, WGL, and DPAPI), plus two pinned dependencies:
+libprojectM 4.x (LGPL-2.1, built from upstream source and linked dynamically)
+and the Spout SDK's DX subset (BSD-2-Clause, vendored in-tree). Small ini and
+base64url helpers have regression tests. Spotify JSON uses the Windows JSON
+parser through the Windows SDK's C++/WinRT headers. See the
+[review findings and limits](docs/ADVERSARIAL-REVIEW.md).
 
 ## Licensing
 

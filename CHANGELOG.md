@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.1.1 — 2026-09-09
+
+First signed Windows release, with GUI fixes and the repository's first
+adversarial review of application code and release automation.
+
+- Native Spotify Options dialog (F2); removed the bundled client ID. Old login
+  tokens are cleared when the ID changes or the user disconnects.
+- Hardened OAuth callback parsing, bounded local/network reads, serialized
+  refresh requests, nonmodal worker errors, and correct Unicode/JSON metadata.
+- Fixed recorder crashes after automatic stop and rapid recording filename collisions.
+- Fixed the lab opening shortcut modifying preset text and stale editor overlays.
+- Added palette pagination, modal input isolation, long-label clipping, narrow
+  deck wrapping, minimum window dimensions, and reliable slider capture.
+- Selftest runs without loading or writing personal configuration or Spotify tokens.
+- Repaired packaging; stage tracked assets only and produce SHA-256 checksums.
+- Added pinned Windows CI and Azure OIDC signing with signer/timestamp verification
+  and draft releases. Added Windows file version metadata and compiler hardening.
+
 ## 1.1.0 — 2026-07-12
 
 MilkDrop deck true-up: morph transitions, a live preset lab, and audio-driven

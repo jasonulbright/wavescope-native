@@ -1,0 +1,4 @@
+#pragma once
+#define WAVESCOPE_VERSION L"1.1.1"
+#define WAVESCOPE_VERSION_NUMBER 1,1,1,0
+#define WAVESCOPE_VERSION_STRING "1.1.1.0\0"

@@ -150,6 +150,10 @@ static bool StVerifyMp4(const wchar_t* path, const wchar_t* framePng,
 
 // Drive one view through every engine on the demo signal; verify output.
 static int RunSelfTest(App* v) {
+    // PrintWindow/DWM needs a visible presentation surface. The harness may
+    // be launched by a hidden packaging process; show its own test window
+    // without taking focus rather than mistaking an occluded target for black.
+    ShowWindow(v->hwnd, SW_SHOWNOACTIVATE);
     std::wstring dir = PmExeDir();
     FILE* log = _wfopen((dir + L"wavescope-selftest.log").c_str(), L"w, ccs=UTF-8");
     auto out = [&](const wchar_t* fmt, auto... args) {
@@ -168,6 +172,35 @@ static int RunSelfTest(App* v) {
     g_tap.SetSource(AudioTap::SRC_DEMO);
     out(L"selftest: WaveScope %s", WAVESCOPE_VERSION);
     out(L"selftest: source=%s sampleRate=%u", g_tap.SourceName(), g_tap.SampleRate());
+
+    // Small-window layout and modal input regressions, independent of a GPU.
+    {
+        bool pass = true;
+        auto inside = [](const D2D1_RECT_F& r, float w, float h) {
+            return r.left >= 0 && r.top >= 0 && r.right <= w + 0.1f && r.bottom <= h + 0.1f;
+        };
+        for (int engine = 0; engine < 3; ++engine) {
+            v->pmActive = engine == 2; v->shaderActive = engine == 1;
+            v->pmHost.curName = std::wstring(250, L'A');
+            for (float width : {760.0f, 960.0f, 1440.0f}) {
+                D2D1_RECT_F buttons[App::DK_N]; v->DeckLayout(width, 560, buttons);
+                for (int i = 0; i < App::DK_N; ++i) if (!v->DeckHidden(i)) pass &= inside(buttons[i], width, 560);
+            }
+        }
+        v->pmActive = v->shaderActive = false;
+        for (int i = 0; i < 64; ++i) { CustomPalette cp; cp.name = L"test"; v->customPalettes.push_back(cp); }
+        v->palOffset = 69;
+        App::PalRects palette; v->PalLayout(760, 560, palette);
+        pass &= inside(palette.card, 760, 560) && inside(palette.addBtn, 760, 560);
+        pass &= v->palOffset + palette.rows == v->PaletteCount();
+        v->palPanel = true; v->nameFocused = false;
+        int source = g_tap.Source();
+        SendMessageW(v->hwnd, WM_KEYDOWN, '2', 0);
+        pass &= g_tap.Source() == source; // a modal panel cannot switch to mic
+        v->palPanel = false; v->customPalettes.clear(); v->palInclude.clear(); v->palOffset = 0;
+        out(L"gui: small-window deck, palette paging, modal input -> %s", pass ? L"PASS" : L"FAIL");
+        if (!pass) rc = 1;
+    }
 
     // --- built-in D2D modes ---
     if (v->pmActive) v->ToggleProjectM();
@@ -218,6 +251,26 @@ static int RunSelfTest(App* v) {
             if (!pass) rc = 1;
         }
         v->modeIdx = keepMode;
+    }
+
+    // A worker may stop without Stop() when a window becomes too small.
+    // Restart must reap that thread rather than std::terminate the process.
+    {
+        Recorder recorder;
+        bool pass = recorder.Start(128, 128, 48000, nullptr);
+        std::vector<uint8_t> pixels(128 * 128 * 4, 80);
+        if (pass) {
+            recorder.PushVideo(pixels.data(), 128, 128);
+            recorder.PushVideo(pixels.data(), 64, 64);
+            ULONGLONG deadline = GetTickCount64() + 5000;
+            while (recorder.Active() && GetTickCount64() < deadline) Sleep(10);
+            pass &= !recorder.Active();
+            pass &= recorder.Start(128, 128, 48000, nullptr);
+            recorder.PushVideo(pixels.data(), 128, 128);
+            recorder.Stop();
+        }
+        out(L"record: restart after automatic stop -> %s", pass ? L"PASS" : L"FAIL");
+        if (!pass) rc = 1;
     }
 
     // --- Spout output (shared-texture roundtrip, in-process receiver) ---
@@ -454,6 +507,19 @@ static int RunSelfTest(App* v) {
     } else {
         v->EnterProjectM(false);
         for (int i = 0; i < 20; i++) { pump(); v->Render(); }
+        std::wstring original = v->pmHost.CurrentPresetText();
+        SendMessageW(v->hwnd, WM_KEYDOWN, 'L', 0);
+        SendMessageW(v->hwnd, WM_CHAR, 'l', 0);
+        bool inputPass = v->labPanel && v->labText == original;
+        RECT client; GetClientRect(v->hwnd, &client);
+        v->BuildOverlay(client.right, client.bottom, L"fixed", L"");
+        SendMessageW(v->hwnd, WM_CHAR, 'z', 0);
+        bool editRedraw = v->BuildOverlay(client.right, client.bottom, L"fixed", L"");
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+        bool closeRedraw = v->BuildOverlay(client.right, client.bottom, L"fixed", L"");
+        bool guiPass = inputPass && editRedraw && closeRedraw;
+        out(L"gui: lab shortcut preserves text; edit/close redraw -> %s", guiPass ? L"PASS" : L"FAIL");
+        if (!guiPass) rc = 1;
         std::wstring wtext = v->pmHost.CurrentPresetText();
         int u8n = WideCharToMultiByte(CP_UTF8, 0, wtext.data(), (int)wtext.size(), nullptr, 0, nullptr, nullptr);
         std::string valid((size_t)(u8n > 0 ? u8n : 0), '\0');

@@ -1,2 +1,7 @@
 #pragma once
 #define IDI_APP_ICON 101
+#define IDD_OPTIONS 102
+#define IDC_SP_CLIENT 1001
+#define IDC_SP_STATUS 1002
+#define IDC_SP_DISCONNECT 1003
+#define IDC_SP_REDIRECT 1004
