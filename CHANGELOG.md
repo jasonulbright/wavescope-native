@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added a native preset browser (F3) with live search, saved favorites,
+  favorites-only filtering and a favorites-only shuffle pool.
 - Show the status display and bottom controls for 15 seconds on launch, or
   until the first keypress. Added an on-screen hint for finding controls, help
   and Options. Mouse activity and open menus retain their normal behavior.

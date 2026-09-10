@@ -67,6 +67,7 @@ struct ProjectMHost {
     std::wstring scanDir;             // folder currently scanned/watched
     HANDLE presetWatch = nullptr;     // hot-reload change notification
     int presetIdx = -1;               // -1 when the playing preset is no longer in this library
+    unsigned presetsRevision = 0;
     bool ready = false;
     int lost = 0;             // consecutive wglMakeCurrent failures (GPU reset)
     bool loadFailed = false;  // set by the preset-switch-failed callback below
@@ -204,6 +205,7 @@ struct ProjectMHost {
     // stable), and (re)arm a folder watch so dropped/removed presets
     // hot-reload the library.
     void ScanPresets(const std::wstring& folder) {
+        ++presetsRevision;
         scanDir = folder;
         presetPaths.clear();
         WIN32_FIND_DATAW fd;
