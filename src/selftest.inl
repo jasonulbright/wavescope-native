@@ -278,7 +278,91 @@ static int RunSelfTest(App* v) {
         if (!pass) rc = 1;
     }
 
-    // --- built-in D2D modes ---
+    // File transport exercises the real decoder and output clock with a
+    // three-second silent WAV (no test tones through the user's speakers).
+    {
+        auto until = [&](auto predicate, DWORD timeout = 2500) {
+            ULONGLONG end = GetTickCount64() + timeout;
+            do { if (predicate()) return true; pump(); Sleep(10); } while (GetTickCount64() < end);
+            return predicate();
+        };
+        wchar_t temp[MAX_PATH], id[40]; GetTempPathW(MAX_PATH, temp);
+        GUID guid; CoCreateGuid(&guid); StringFromGUID2(guid, id, 40);
+        std::wstring path = std::wstring(temp) + L"WaveScope-transport-" + id + L".wav";
+        const DWORD bytes = 48000 * 3 * 2;
+        std::vector<uint8_t> wav(44 + bytes, 0);
+        memcpy(wav.data(), "RIFF", 4); memcpy(wav.data()+8, "WAVEfmt ", 8); memcpy(wav.data()+36, "data", 4);
+        auto u32 = [&](int at, DWORD n) { memcpy(wav.data()+at, &n, 4); };
+        auto u16 = [&](int at, WORD n) { memcpy(wav.data()+at, &n, 2); };
+        u32(4,36+bytes); u32(16,16); u16(20,1); u16(22,1); u32(24,48000);
+        u32(28,96000); u16(32,2); u16(34,16); u32(40,bytes);
+        FILE* audio = _wfopen(path.c_str(), L"wb");
+        bool pass = audio != nullptr;
+        if (audio) { pass &= fwrite(wav.data(),1,wav.size(),audio) == wav.size(); fclose(audio); }
+        g_tap.SetFile(path.c_str()); auto state = g_tap.FileState();
+        pass &= until([&] { return state->ready && state->position > 1000000; });
+        pass &= state->duration == 30000000 && state->seekable;
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_F5, 0);
+        pass &= v->transportDialog != nullptr;
+        SendDlgItemMessageW(v->transportDialog, IDC_AUDIO_PLAY, BM_CLICK, 0, 0);
+        pass &= state->paused;
+        Sleep(50); LONGLONG pausedAt = state->position; Sleep(100);
+        pass &= state->position == pausedAt;
+        AudioTap::TapCursor silentCursor; silentCursor.idx = UINT64_MAX;
+        float quiet[2048]; g_tap.ReadNew(silentCursor, quiet, 2048); Sleep(30);
+        int quietCount = g_tap.ReadNew(silentCursor, quiet, 2048);
+        pass &= quietCount > 0; // paused recordings still receive real-time silence
+        for (int i = 0; i < quietCount; ++i) pass &= quiet[i] == 0;
+        SendDlgItemMessageW(v->transportDialog, IDC_AUDIO_SEEK, TBM_SETPOS, TRUE, 5000);
+        SendMessageW(v->transportDialog, WM_HSCROLL, TB_ENDTRACK, (LPARAM)GetDlgItem(v->transportDialog, IDC_AUDIO_SEEK));
+        pass &= until([&] { return state->seek < 0 && state->position == 15000000; });
+        pass &= state->paused;
+        // Space still advances the visual; Ctrl+Space only toggles audio.
+        int mode = v->modeIdx; BYTE keys[256]; GetKeyboardState(keys);
+        BYTE ctrl[256]; memcpy(ctrl, keys, sizeof(keys)); ctrl[VK_CONTROL] |= 0x80; SetKeyboardState(ctrl);
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_SPACE, 0); SetKeyboardState(keys);
+        pass &= !state->paused && v->modeIdx == mode;
+        SendMessageW(v->hwnd, WM_KEYDOWN, VK_SPACE, 0);
+        pass &= v->modeIdx != mode && !state->paused; v->modeIdx = mode;
+        SendDlgItemMessageW(v->transportDialog, IDC_AUDIO_LOOP, BM_CLICK, 0, 0);
+        pass &= !state->loop;
+        g_tap.SeekFile(28000000);
+        pass &= until([&] { return state->ended && state->paused; });
+        pass &= state->position == state->duration;
+        SendDlgItemMessageW(v->transportDialog, IDC_AUDIO_PLAY, BM_CLICK, 0, 0);
+        pass &= until([&] { return !state->ended && state->position > 0 && state->position < 10000000; });
+        SendDlgItemMessageW(v->transportDialog, IDC_AUDIO_LOOP, BM_CLICK, 0, 0);
+        pass &= state->loop;
+        g_tap.SeekFile(28000000);
+        pass &= until([&] { return state->position >= 28000000; });
+        pass &= until([&] { return state->seek < 0 && state->position < 10000000 && !state->paused; });
+        g_tap.ToggleFilePause(); v->RefreshTransport();
+        std::vector<uint8_t> pixels; int width = 0, height = 0;
+        if (StCaptureWindow(v->transportDialog, pixels, width, height))
+            StWritePng((dir + L"selftest-audio-player.png").c_str(), pixels.data(), width, height, false);
+        DestroyWindow(v->transportDialog);
+        out(L"audio: pause clock, seek while paused, shortcuts, drain/stop, replay, loop -> %s", pass ? L"PASS" : L"FAIL");
+        if (!pass) rc = 1;
+
+        // Errors belong to their load, and choosing a valid file recovers.
+        g_tap.SetFile((path + L".missing").c_str()); auto broken = g_tap.FileState();
+        bool recovery = until([&] { return FAILED(broken->error.load()); });
+        v->OpenTransport(); v->RefreshTransport();
+        recovery &= !IsWindowEnabled(GetDlgItem(v->transportDialog, IDC_AUDIO_PLAY)) &&
+            WsControlText(GetDlgItem(v->transportDialog, IDC_AUDIO_STATUS)).find(L"Playback failed") != std::wstring::npos;
+        g_tap.SetFile(path.c_str()); state = g_tap.FileState();
+        recovery &= until([&] { return state->ready && state->position > 0; });
+        recovery &= SUCCEEDED(state->error.load()) && !state->paused && state != broken;
+        v->RefreshTransport(); recovery &= IsWindowEnabled(GetDlgItem(v->transportDialog, IDC_AUDIO_PLAY)) != FALSE;
+        DestroyWindow(v->transportDialog);
+        g_tap.SetSource(AudioTap::SRC_DEMO);
+        recovery &= until([&] { return DeleteFileW(path.c_str()) != FALSE; });
+        recovery &= g_tap.Source() == AudioTap::SRC_DEMO;
+        out(L"audio: failed load, new-file recovery, source change and file cleanup -> %s", recovery ? L"PASS" : L"FAIL");
+        if (!recovery) rc = 1;
+    }
+
+    // Keyboard and persistent controls.
     {
         SendMessageW(v->hwnd, WM_KEYDOWN, VK_TAB, 0);
         bool pass = v->DeckShown() && v->deckKeyboard && v->deckFocus >= 0;

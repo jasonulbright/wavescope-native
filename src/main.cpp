@@ -33,6 +33,7 @@
 #include <mferror.h>
 #include <dwmapi.h>
 #include <richedit.h>
+#include <commctrl.h>
 
 #include <atomic>
 #include <cmath>
@@ -41,6 +42,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <memory>
+#include <string>
+#include <climits>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "d2d1.lib")
@@ -54,6 +58,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "comctl32.lib")
 
 // ---------------------------------------------------------------- utilities
 
@@ -93,15 +98,39 @@ public:
         default:       return L"SYSTEM AUDIO";
         }
     }
-    // Play + analyze a decoded audio file (Media Foundation). The generation
-    // bump makes RunFile restart even when the source is already FILE, so
-    // picking a second file switches tracks.
+    // Each load owns its transport state. A retiring decoder cannot publish
+    // stale progress or an error into a newly selected track.
+    struct FilePlayback {
+        explicit FilePlayback(const wchar_t* p) : path(p) {}
+        const std::wstring path;
+        std::atomic<bool> ready{false}, paused{false}, ended{false}, loop{true}, seekable{false}, seeking{false};
+        std::atomic<LONGLONG> position{0}, duration{0}, seek{-1}; // 100 ns units
+        std::atomic<HRESULT> error{S_OK};
+    };
+    std::shared_ptr<FilePlayback> FileState() {
+        AcquireSRWLockShared(&m_lock); auto f = m_file; ReleaseSRWLockShared(&m_lock); return f;
+    }
     void SetFile(const wchar_t* path) {
+        auto f = std::make_shared<FilePlayback>(path);
         AcquireSRWLockExclusive(&m_lock);
-        wcsncpy_s(m_filePath, path, _TRUNCATE);
+        m_file = f; ++m_fileGen; m_source = SRC_FILE;
         ReleaseSRWLockExclusive(&m_lock);
-        m_fileGen++;
-        m_source = SRC_FILE;
+    }
+    void ToggleFilePause() {
+        auto f = FileState();
+        if (Source() != SRC_FILE || !f || !f->ready || FAILED(f->error.load())) return;
+        if (f->ended) { if (!f->seekable) return; f->seek = 0; f->ended = false; f->paused = false; }
+        else f->paused = !f->paused;
+    }
+    void SeekFile(LONGLONG position) {
+        auto f = FileState();
+        if (Source() != SRC_FILE || !f || !f->ready || !f->seekable || FAILED(f->error.load())) return;
+        f->seek = (std::max)(0LL, (std::min)(position, f->duration.load()));
+    }
+    bool FileSilent() {
+        if (Source() != SRC_FILE) return false;
+        auto f = FileState();
+        return !f || !f->ready || f->paused || FAILED(f->error.load());
     }
 
     // A consumer's read position into the tap. Each consumer (projectM feed,
@@ -113,7 +142,8 @@ public:
     // not a re-sent sliding window. On the demo source the signal is
     // synthesized at real-time pace instead.
     int ReadNew(TapCursor& c, float* out, int maxn) {
-        if (m_source.load() == SRC_DEMO) {
+        bool silent = FileSilent();
+        if (m_source.load() == SRC_DEMO || silent) {
             double sr = (double)(m_sampleRate.load() ? m_sampleRate.load() : 48000);
             double nowMs = (double)GetTickCount64();
             if (c.demoMs == 0.0) c.demoMs = nowMs;
@@ -125,10 +155,12 @@ public:
             // uptimes; one tiny wobble discontinuity every ~8 h is invisible.
             float cents[5]; DemoDetune((float)fmod(t0, 30000.0), cents);
             for (int i = 0; i < n; i++)
-                out[i] = DemoSynth(t0 + (double)i / sr, cents);
+                out[i] = silent ? 0.0f : DemoSynth(t0 + (double)i / sr, cents);
+            if (silent) { AcquireSRWLockShared(&m_lock); c.idx = m_writeIdx; ReleaseSRWLockShared(&m_lock); }
             c.demoMs += (double)n * 1000.0 / sr;
             return n;
         }
+        c.demoMs = 0;
         AcquireSRWLockShared(&m_lock);
         uint64_t w = m_writeIdx;
         if (c.idx > w) c.idx = w;
@@ -151,6 +183,8 @@ public:
             float cents[5]; DemoDetune(now, cents);
             for (int i = 0; i < 2048; i++)
                 window[i] = DemoSynth((double)now - (double)(2048 - i) / sr, cents);
+        } else if (FileSilent()) {
+            memset(window, 0, sizeof(window));
         } else {
             AcquireSRWLockShared(&m_lock);
             uint64_t w = m_writeIdx;
@@ -339,115 +373,7 @@ private:
         return 0;
     }
 
-    // Decode a file with Media Foundation, render it to the default output,
-    // and feed the same samples (mono) into the analysis ring in sync. Loops
-    // the file. Runs until the source changes or the app quits.
-    void RunFile() {
-        wchar_t path[MAX_PATH];
-        uint32_t gen = m_fileGen.load();   // a new SetFile restarts playback
-        AcquireSRWLockShared(&m_lock);
-        wcsncpy_s(path, m_filePath, _TRUNCATE);
-        ReleaseSRWLockShared(&m_lock);
-        if (!path[0]) { Sleep(50); m_source = SRC_LOOPBACK; return; }
-
-        const UINT32 RATE = 48000, CH = 2;
-        WAVEFORMATEX wf = {};
-        wf.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
-        wf.nChannels = (WORD)CH; wf.nSamplesPerSec = RATE; wf.wBitsPerSample = 32;
-        wf.nBlockAlign = (WORD)(CH * 4); wf.nAvgBytesPerSec = RATE * CH * 4;
-
-        // Media Foundation source reader -> float PCM at our format.
-        IMFSourceReader* reader = nullptr;
-        if (FAILED(MFCreateSourceReaderFromURL(path, nullptr, &reader)) || !reader) {
-            m_source = SRC_LOOPBACK; return;
-        }
-        reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE);
-        reader->SetStreamSelection(MF_SOURCE_READER_FIRST_AUDIO_STREAM, TRUE);
-        IMFMediaType* outType = nullptr; MFCreateMediaType(&outType);
-        outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        outType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
-        outType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, CH);
-        outType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, RATE);
-        outType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 32);
-        outType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, CH * 4);
-        outType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, RATE * CH * 4);
-        HRESULT hr = reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_AUDIO_STREAM, nullptr, outType);
-        outType->Release();
-        if (FAILED(hr)) { reader->Release(); m_source = SRC_LOOPBACK; return; }
-
-        // WASAPI render on the default output; the engine converts our format.
-        IMMDeviceEnumerator* devEnum = nullptr; IMMDevice* device = nullptr;
-        IAudioClient* client = nullptr; IAudioRenderClient* render = nullptr;
-        UINT32 bufFrames = 0;
-        hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-                              __uuidof(IMMDeviceEnumerator), (void**)&devEnum);
-        if (SUCCEEDED(hr)) hr = devEnum->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-        if (SUCCEEDED(hr)) hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, (void**)&client);
-        if (SUCCEEDED(hr)) hr = client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-            AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-            1000000, 0, &wf, nullptr);
-        if (SUCCEEDED(hr)) hr = client->GetBufferSize(&bufFrames);
-        if (SUCCEEDED(hr)) hr = client->GetService(__uuidof(IAudioRenderClient), (void**)&render);
-        if (SUCCEEDED(hr)) hr = client->Start();
-
-        if (SUCCEEDED(hr)) {
-            m_sampleRate = RATE;
-            std::vector<float> pending; size_t pos = 0; // interleaved stereo
-            while (!m_quit && m_source.load() == SRC_FILE && m_fileGen.load() == gen) {
-                if ((pending.size() - pos) < (size_t)bufFrames * 2 * 4) {
-                    DWORD flags = 0; IMFSample* sample = nullptr;
-                    if (SUCCEEDED(reader->ReadSample(MF_SOURCE_READER_FIRST_AUDIO_STREAM, 0,
-                                                     nullptr, &flags, nullptr, &sample))) {
-                        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
-                            PROPVARIANT var; PropVariantInit(&var);
-                            var.vt = VT_I8; var.hVal.QuadPart = 0;
-                            reader->SetCurrentPosition(GUID_NULL, var);
-                            PropVariantClear(&var);
-                        } else if (sample) {
-                            IMFMediaBuffer* buf = nullptr;
-                            if (SUCCEEDED(sample->ConvertToContiguousBuffer(&buf)) && buf) {
-                                BYTE* data = nullptr; DWORD len = 0;
-                                if (SUCCEEDED(buf->Lock(&data, nullptr, &len))) {
-                                    const float* fp = (const float*)data;
-                                    pending.insert(pending.end(), fp, fp + len / 4);
-                                    buf->Unlock();
-                                }
-                                buf->Release();
-                            }
-                        }
-                        if (sample) sample->Release();
-                    }
-                }
-                UINT32 pad = 0;
-                if (SUCCEEDED(client->GetCurrentPadding(&pad))) {
-                    UINT32 avail = bufFrames - pad;
-                    size_t haveFrames = (pending.size() - pos) / 2;
-                    UINT32 toWrite = (UINT32)(haveFrames < avail ? haveFrames : avail);
-                    if (toWrite > 0) {
-                        BYTE* out = nullptr;
-                        if (SUCCEEDED(render->GetBuffer(toWrite, &out))) {
-                            memcpy(out, pending.data() + pos, (size_t)toWrite * 2 * sizeof(float));
-                            AcquireSRWLockExclusive(&m_lock);
-                            for (UINT32 i = 0; i < toWrite; i++)
-                                m_ring[(m_writeIdx++) % RING] =
-                                    (pending[pos + i * 2] + pending[pos + i * 2 + 1]) * 0.5f;
-                            ReleaseSRWLockExclusive(&m_lock);
-                            render->ReleaseBuffer(toWrite, 0);
-                            pos += (size_t)toWrite * 2;
-                        }
-                    }
-                }
-                if (pos > (1 << 18)) { pending.erase(pending.begin(), pending.begin() + pos); pos = 0; }
-                Sleep(3);
-            }
-            client->Stop();
-        }
-        SafeRelease(&render);
-        SafeRelease(&client);
-        SafeRelease(&device);
-        SafeRelease(&devEnum);
-        reader->Release();
-    }
+    void RunFile();
 
     HANDLE m_thread = nullptr;
     std::atomic<bool> m_quit{false};
@@ -459,8 +385,10 @@ private:
     uint64_t m_writeIdx = 0;
     std::atomic<UINT32> m_sampleRate{48000};
     AnalysisState m_an;
-    wchar_t m_filePath[MAX_PATH] = {};
+    std::shared_ptr<FilePlayback> m_file;
 };
+
+#include "audio_file.inl"
 
 // ------------------------------------------------------------------- modes
 
@@ -606,10 +534,20 @@ struct App {
             if (msg->wParam == 'S') { SaveNativeLab(); return true; }
             if (msg->wParam == VK_RETURN) { SyncLabEditor(); LabApply(); RefreshLabStatus(); return true; }
         }
+        auto inDialog = [&](HWND dlg) { return dlg && (msg->hwnd == dlg || IsChild(dlg, msg->hwnd)); };
+        if ((inDialog(transportDialog) || inDialog(controlsDialog) || inDialog(presetDialog)) &&
+            msg->message == WM_KEYDOWN && msg->wParam == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            if (!(msg->lParam & (1LL << 30))) g_tap.ToggleFilePause(); return true;
+        }
         return (labDialog && IsDialogMessageW(labDialog, msg)) ||
                (presetDialog && IsDialogMessageW(presetDialog, msg)) ||
-               (controlsDialog && IsDialogMessageW(controlsDialog, msg));
+               (controlsDialog && IsDialogMessageW(controlsDialog, msg)) ||
+               (transportDialog && IsDialogMessageW(transportDialog, msg));
     }
+    HWND transportDialog = nullptr;
+    bool transportDragging = false;
+    void OpenTransport();
+    void RefreshTransport();
     std::wstring FavoriteKey(const std::wstring& path) const {
         return WsPresetKey(path, PmExeDir(), WsDataDir());
     }
@@ -1247,7 +1185,7 @@ struct App {
         const wchar_t* CH = L" \x25BE";   // ▾ dropdown chevron
         switch (i) {
         case DK_SYS:  return L"system"; case DK_MIC:  return L"mic";
-        case DK_FILE: return L"file";   case DK_DEMO: return L"demo"; case DK_SPOT: return L"spotify";
+        case DK_FILE: return L"file (F5)"; case DK_DEMO: return L"demo"; case DK_SPOT: return L"spotify";
         case DK_PREV: return L"\x2039"; case DK_NEXT: return L"\x203A";
         case DK_PICK: return (pmActive   ? std::wstring(pmHost.PresetName())
                             : shaderActive ? std::wstring(shaderHost.ShaderName(shaderIdx))
@@ -1441,7 +1379,7 @@ struct App {
         case DK_SYS:   g_tap.SetSource(AudioTap::SRC_LOOPBACK); break;
         case DK_MIC:   g_tap.SetSource(AudioTap::SRC_MIC); break;
         case DK_DEMO:  g_tap.SetSource(AudioTap::SRC_DEMO); break;
-        case DK_FILE:  OpenFile(); break;
+        case DK_FILE:  if (g_tap.Source() == AudioTap::SRC_FILE) OpenTransport(); else OpenFile(); break;
         case DK_SPOT:  SpotifyButton(); break;
         case DK_PREV:  CyclePick(-1); break;
         case DK_NEXT:  CyclePick(1); break;
@@ -1923,7 +1861,7 @@ struct App {
             p.Rect(x, y, w, 66, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.95f);
             p.Text(x + 14, y + 9, w - 28, 50,
                 L"Move the mouse to the bottom edge to bring back the controls.\n"
-                L"F1  Help     F2  Spotify     F3  Presets     F4  Controls\n"
+                L"F1 Help   F2 Spotify   F3 Presets   F4 Controls   F5 Audio\n"
                 L"Auto-hides after 15 seconds or your first keypress.",
                 1, 1, 1, 0.95f);
         }
@@ -2012,10 +1950,11 @@ struct App {
             L"ESC            close panel / menu / fullscreen, then quit\n"
             L"TAB / arrows   navigate deck; ENTER activates; ESC leaves\n"
             L"F4             accessible controls + pin; mouse bottom reveals deck\n"
+            L"F5             audio player      Ctrl+Space   pause / resume file\n"
             L"\n"
             L"Launch: WaveScope.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
             L"        [install-startup | remove-startup]   \x2014   tray icon: right-click";
-        float w = 620, h = 541;
+        float w = 620, h = 559;
         float x = (p.W() - w) * 0.5f, y = (p.H() - h) * 0.5f;
         if (x < 0) x = 0; if (y < 0) y = 0;
         p.Rect(x, y, w, h, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.95f);
@@ -2058,13 +1997,13 @@ struct App {
         wchar_t file[MAX_PATH] = {};
         OPENFILENAMEW ofn = {};
         ofn.lStructSize = sizeof(ofn);
-        ofn.hwndOwner = hwnd;
+        ofn.hwndOwner = transportDialog ? transportDialog : hwnd;
         ofn.lpstrFilter =
             L"Audio files\0*.mp3;*.wav;*.flac;*.m4a;*.aac;*.wma;*.ogg\0All files\0*.*\0";
         ofn.lpstrFile = file;
         ofn.nMaxFile = MAX_PATH;
         ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER;
-        if (GetOpenFileNameW(&ofn)) g_tap.SetFile(file);
+        if (GetOpenFileNameW(&ofn)) { g_tap.SetFile(file); OpenTransport(); }
     }
 
     // Point the projectM engine at a folder of .milk presets.
@@ -2655,6 +2594,7 @@ struct App {
     // Release everything this window owns (GL hosts, D2D). The audio tap is
     // global and outlives the windows.
     void Shutdown() {
+        if (transportDialog) DestroyWindow(transportDialog);
         if (labDialog) DestroyWindow(labDialog);
         if (controlsDialog) DestroyWindow(controlsDialog);
         if (presetDialog) DestroyWindow(presetDialog);
@@ -2680,6 +2620,7 @@ struct App {
 // signal, dumps PNGs of what rendered, writes wavescope-selftest.log.
 #include "preset_browser.inl"
 #include "controls.inl"
+#include "audio_transport.inl"
 #include "lab_native.inl"
 #include "selftest.inl"
 
@@ -2820,6 +2761,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // The preset lab is modal: while it's open every key belongs to the
         // editor (or its name field) — no app shortcut may fire mid-edit.
         if (a->labPanel) { if (wp == VK_ESCAPE) a->CloseLab(); return 0; }
+        if (wp == VK_SPACE && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            if (!(lp & (1LL << 30))) g_tap.ToggleFilePause(); return 0;
+        }
         // While the palette-name field has focus, letters belong to the name
         // (WM_CHAR), not to shortcuts — typing "Sunset" must not cycle the
         // shuffle timer or launch the Spotify flow. ESC still closes.
@@ -2921,6 +2865,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case VK_F2:    a->OpenOptions(); break;
         case VK_F3:    a->OpenPresetBrowser(); break;
         case VK_F4:    a->OpenControls(); break;
+        case VK_F5:    a->OpenTransport(); break;
         case VK_F1:    a->help = !a->help; break;
         case VK_OEM_2: if (GetKeyState(VK_SHIFT) & 0x8000) a->help = !a->help; break; // '?'
         case VK_ESCAPE:
@@ -3155,11 +3100,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int nCmdShow) {
     if (wall) OpenCompanions(hInstance);
     TrayAdd(g_views[0]->hwnd); // one tray icon for the app (primary window)
 
-    // Command-line, applied to every window: "demo" synthetic signal,
-    // "file=<path>" playback, "milkdrop"/"shader" boot into those engines.
+    // Source is shared; engine flags apply to every view.
+    if (opts.demo) g_tap.SetSource(AudioTap::SRC_DEMO);
+    if (!opts.file.empty()) { g_tap.SetFile(opts.file.c_str()); g_views[0]->OpenTransport(); }
     for (App* v : g_views) {
-        if (opts.demo) g_tap.SetSource(AudioTap::SRC_DEMO);
-        if (!opts.file.empty()) g_tap.SetFile(opts.file.c_str());
         if (opts.milkdrop) v->ToggleProjectM();
         if (opts.shader) v->ToggleShader();
     }

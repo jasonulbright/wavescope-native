@@ -77,6 +77,7 @@ void App::OpenLab() {
     if (!richEdit) return;
     if (presetDialog) DestroyWindow(presetDialog);
     if (controlsDialog) DestroyWindow(controlsDialog);
+    if (transportDialog) DestroyWindow(transportDialog);
     deckMenu = -1; palPanel = false; help = false;
     labText = WsLabLines(pmHost.CurrentPresetText()); labSavedText = labText;
     labSeedName = pmHost.PresetName();

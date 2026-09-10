@@ -22,24 +22,27 @@ projectM and classic presets, MP4 encode/decode, Spout, morphing and lab tests.
 The deletion test avoids dereferencing the known stale index in an unfixed
 build, so it reports the error without depending on a crash.
 
-## Recommended feature order
+## First four priorities implemented
 
-These are design recommendations based on the implementation and GUI review,
-not a commitment to ship every item in the next release.
+Implemented in order, with one commit per feature. These remain unreleased.
+
+| Priority | Result | Validation |
+| --- | --- | --- |
+| 1 | F3 native preset browser: live filename search, favorites, favorites-only browsing and shuffle. Bundled/user favorites retain identity when moving a portable folder. | Native filtering, empty results, favorite persistence, filtered shuffle and empty-pool behavior. |
+| 2 | Saved deck pin, Tab/arrow/Enter navigation, and F4 native controls with standard Windows names and keyboard access. | Visibility after timeout, keyboard action isolation, native controls and rendered layout. |
+| 3 | Resizable native rich-edit lab: selection, clipboard, undo/redo, Unicode, scrolling, modified indicator and save/discard/cancel on close or exit. | Selection replacement, Unicode, undo/redo, cancel, failed-save preservation, atomic Save As and native screenshot. |
+| 4 | F5 audio player: filename, elapsed/total time, pause, seek while paused, loop and replay. Ctrl+Space controls playback; Space keeps advancing visuals. | Real Media Foundation/WASAPI playback of a silent WAV: paused clock, seek, EOF drain/stop, replay, loop, shortcuts, load failure and recovery. |
+
+All four also run through the full application selftest covering the rendering
+engines, recording, Spout, preset loading and the editor. Windows supplies native
+clipboard behavior; the automated editor test does not replace the user's clipboard.
+
+## Remaining recommendations
 
 | Priority | Addition | Why it matters / useful first scope |
 | --- | --- | --- |
-| 1 | **Preset search and favorites** | The picker pages through 551 classics with no text filter or favorites. Add instant filename search, a favorite toggle and a favorites-only shuffle pool. Keep favorites by full path so libraries can contain duplicate names. |
-| 2 | **Keyboard access and persistent controls** | The custom deck is mouse-driven. Add an explicit show/hide shortcut, a pin-controls option, Tab/arrow/Enter navigation and accessible names/states. H only controls the status readout. The native Options dialog already has standard Windows navigation. |
-| 3 | **A usable text editor in the preset lab** | The editor lacks selection, clipboard operations, undo/redo and horizontal scrolling. Closing it discards unsaved changes. Standard editing behavior, a modified indicator and a save/discard choice would make the lab practical for real presets. |
-| 4 | **Audio-file playback controls** | File mode plays one file in a loop, without pause, seek, elapsed time or a loop toggle. Add a small transport and filename display; keep Space's existing next-visual shortcut or explicitly resolve that conflict. |
 | 5 | **Audio device and signal controls** | Capture follows Windows' default endpoint, with no device picker or input-level control. A device selector, signal meter and gain/sensitivity setting would help microphone users and multi-interface setups. |
 | 6 | **Recording feedback and destination controls** | The recording indicator shares the fading HUD. Add a persistent recording badge, clear stop/failure feedback, a destination picker and an Open recordings folder action. |
-
-I would take search/favorites and keyboard/pinned controls first. Together they
-make the existing visual library easier to find and operate. The lab and file
-transport improvements deserve separate focused changes because they add
-state, navigation and preservation behavior that need their own tests.
 
 ## README and screenshots
 
