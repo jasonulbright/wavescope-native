@@ -588,6 +588,11 @@ struct App {
     std::wstring pageInput;            // digits typed into the jump-to-page field
     PresetFavorites presetFavorites;
     HWND presetDialog = nullptr;
+    HWND controlsDialog = nullptr;
+    int controlsEngine = -1;
+    void OpenControls();
+    void RefreshControls();
+    void ControlsCommand(int id, int code);
     std::vector<std::wstring> browserPaths;
     std::wstring browserLibrary;
     unsigned browserRevision = 0;
@@ -595,7 +600,8 @@ struct App {
     void RefreshPresetBrowser();
     void PresetBrowserCommand(int id, int code);
     bool RouteDialogMessage(MSG* msg) {
-        return presetDialog && IsDialogMessageW(presetDialog, msg);
+        return (presetDialog && IsDialogMessageW(presetDialog, msg)) ||
+               (controlsDialog && IsDialogMessageW(controlsDialog, msg));
     }
     std::wstring FavoriteKey(const std::wstring& path) const {
         return WsPresetKey(path, PmExeDir(), WsDataDir());
@@ -652,6 +658,8 @@ struct App {
     float startupUiUntil = -1; // -1: awaiting first frame; 0: dismissed/expired
     bool help = false;       // F1 / ? full keymap overlay
     bool deckVisible = false;// auto-hiding bottom control bar
+    bool deckPinned = false, deckKeyboard = false;
+    int deckFocus = -1, menuFocus = -1;
     int deckHover = -1;      // button under the cursor, or -1
     float deckActivity = 0;  // last time the deck was touched (for auto-hide)
     bool fullscreen = false;
@@ -673,7 +681,7 @@ struct App {
     }
 
     bool StartupUiVisible() const { return startupUiUntil > 0; }
-    bool DeckShown() const { return deckVisible || deckMenu >= 0 || StartupUiVisible(); }
+    bool DeckShown() const { return deckVisible || deckPinned || deckKeyboard || deckMenu >= 0 || StartupUiVisible(); }
 
     void UpdateUiVisibility(float now) {
         // Start on the first rendered frame, so engine loading doesn't consume
@@ -757,6 +765,7 @@ struct App {
             std::to_wstring(olW) + L"|" + std::to_wstring(olH) + L"|" +
             std::to_wstring(DeckShown()) + L"|" + std::to_wstring(deckHover) + L"|" +
             std::to_wstring(StartupUiVisible()) + L"|" +
+            std::to_wstring(deckPinned) + L"|" + std::to_wstring(deckKeyboard) + L"|" + std::to_wstring(deckFocus) + L"|" + std::to_wstring(menuFocus) + L"|" +
             std::to_wstring(help) + L"|" + std::to_wstring(deckMenu) + L"|" +
             std::to_wstring((int)(HudFade() * 12)) + L"|" +   // fade steps → re-render as HUD fades
             std::to_wstring(DeckActive(DK_SYS)) + std::to_wstring(DeckActive(DK_MIC)) +
@@ -1174,7 +1183,7 @@ struct App {
            DK_TRACE, DK_SHUF, DK_RES,                    // selectors
            DK_LAB,                                        // preset lab button (projectM only)
            DK_MORPHT, DK_MORPH,                          // morph deck (projectM engine only)
-           DK_CALM, DK_PALS, DK_DISP, DK_REC, DK_FULL, DK_OPTIONS, DK_HELP, // actions (right cluster)
+           DK_CALM, DK_PALS, DK_DISP, DK_REC, DK_FULL, DK_OPTIONS, DK_PIN, DK_CONTROLS, DK_HELP,
            DK_N };
     // The morph group carries a slider between its two buttons (target ▾ and
     // the morph button); this is the width reserved for the track + value
@@ -1253,6 +1262,8 @@ struct App {
         case DK_FULL:  return L"fullscreen (F)";
         case DK_OPTIONS: return L"options (F2)";
         case DK_HELP:  return L"?";
+        case DK_PIN: return L"pin";
+        case DK_CONTROLS: return L"controls (F4)";
         default: return L"";
         }
     }
@@ -1413,6 +1424,7 @@ struct App {
         case DK_REC:   return rec.Active();
         case DK_FULL:  return fullscreen;
         case DK_HELP:  return help;
+        case DK_PIN: return deckPinned;
         case DK_PICK: case DK_TRACE: case DK_SHUF: case DK_RES: case DK_DISP: case DK_MORPHT:
             return deckMenu == i;   // highlight whichever dropdown is open
         default:       return false;
@@ -1448,6 +1460,8 @@ struct App {
         case DK_REC:   ToggleRecord(); break;
         case DK_FULL:  ToggleFullscreen(); break;
         case DK_OPTIONS: OpenOptions(); break;
+        case DK_PIN: deckPinned = !deckPinned; SaveConfig(); break;
+        case DK_CONTROLS: OpenControls(); break;
         case DK_HELP:  help = !help; break;
         }
     }
@@ -1668,6 +1682,7 @@ struct App {
     void OpenMenu(int a) {
         if (a == DK_PICK && pmActive) { OpenPresetBrowser(); return; }
         deckMenu = a; pageFocused = false; pageInput.clear(); menuPage = 0;
+        menuFocus = MenuCurrent(a); if (menuFocus < 0) menuFocus = 0;
         if (!rt) return;
         float sc = UiScale(); D2D1_SIZE_F sz = rt->GetSize();
         int cols, perCol, pageSize, pages;
@@ -1741,6 +1756,8 @@ struct App {
         for (int i = 0; i < (int)rows.size(); i++) {
             if (rows[i].left < 0) continue;   // not on the current page
             bool active = (i == cur), off = MenuDisabled(deckMenu, i);
+            if (deckKeyboard && i == menuFocus)
+                p.Stroke(rows[i].left, rows[i].top, rows[i].right - rows[i].left, rows[i].bottom - rows[i].top, 1, 1, 1, 1, 2);
             float rw2 = rows[i].right - rows[i].left, rh2 = rows[i].bottom - rows[i].top;
             std::wstring label = MenuFit(MenuItem(deckMenu, i));
             if (active) {
@@ -1799,6 +1816,7 @@ struct App {
     // Mouse near the bottom edge reveals the deck; hovering keeps it alive.
     // px/py arrive in physical pixels; the UI lives in logical units.
     void OnMouseMove(int pxx, int pxy) {
+        deckKeyboard = false;
         float sc = UiScale();
         int mx = (int)(pxx / sc), my = (int)(pxy / sc);
         hudActivity = Now();   // any movement wakes the HUD (then it fades on idle)
@@ -1901,11 +1919,16 @@ struct App {
             p.Rect(x, y, w, 66, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.95f);
             p.Text(x + 14, y + 9, w - 28, 50,
                 L"Move the mouse to the bottom edge to bring back the controls.\n"
-                L"F1  Help     F2  Options     H  Toggle status display\n"
+                L"F1  Help     F2  Spotify     F3  Presets     F4  Controls\n"
                 L"Auto-hides after 15 seconds or your first keypress.",
                 1, 1, 1, 0.95f);
         }
         if (DeckShown()) DrawDeckP(p);
+        if (DeckShown() && deckKeyboard && deckFocus >= 0 && !DeckHidden(deckFocus)) {
+            D2D1_RECT_F buttons[DK_N]; DeckLayout(p.W(), p.H(), buttons);
+            auto b = buttons[deckFocus];
+            p.Stroke(b.left - 2, b.top - 2, b.right - b.left + 4, b.bottom - b.top + 4, 1, 1, 1, 1, 2);
+        }
         if (DeckShown()) DrawMenu(p);         // open dropdown sits above its anchor
         if (help) DrawHelpP(p);
     }
@@ -1983,11 +2006,12 @@ struct App {
             L"F              fullscreen        H   HUD (auto-fades on idle)\n"
             L"T              always on top     F1 / ?   help    F2   options\n"
             L"ESC            close panel / menu / fullscreen, then quit\n"
-            L"Mouse          bottom edge reveals controls; movement wakes HUD\n"
+            L"TAB / arrows   navigate deck; ENTER activates; ESC leaves\n"
+            L"F4             accessible controls + pin; mouse bottom reveals deck\n"
             L"\n"
             L"Launch: WaveScope.exe [demo | file=PATH | milkdrop | shader | wall | kiosk]\n"
             L"        [install-startup | remove-startup]   \x2014   tray icon: right-click";
-        float w = 620, h = 523;
+        float w = 620, h = 541;
         float x = (p.W() - w) * 0.5f, y = (p.H() - h) * 0.5f;
         if (x < 0) x = 0; if (y < 0) y = 0;
         p.Rect(x, y, w, h, UI_SCOPE_R, UI_SCOPE_G, UI_SCOPE_B, 0.95f);
@@ -2763,6 +2787,7 @@ struct App {
         wi(L"shufflePal", shufflePalettes ? 1 : 0);
         wi(L"engine", pmActive ? (milkMode ? 3 : 2) : (shaderActive ? 1 : 0));
         wi(L"spout", spout.on ? 1 : 0);
+        wi(L"deckPinned", deckPinned ? 1 : 0);
         WritePrivateProfileStringW(L"settings", L"milkFolder", libraryFolder.c_str(), path.c_str());
         presetFavorites.Save(path);
         // Window placement: the pre-fullscreen placement when fullscreen.
@@ -2842,6 +2867,7 @@ struct App {
         shufflePalettes = GetPrivateProfileIntW(L"settings", L"shufflePal", 0, path.c_str()) != 0;
         savedEngine = Clampi(GetPrivateProfileIntW(L"settings", L"engine", 0, path.c_str()), 0, 3);
         savedSpout = GetPrivateProfileIntW(L"settings", L"spout", 0, path.c_str()) != 0;
+        deckPinned = GetPrivateProfileIntW(L"settings", L"deckPinned", 0, path.c_str()) != 0;
         wchar_t mf[MAX_PATH];
         GetPrivateProfileStringW(L"settings", L"milkFolder", L"", mf, MAX_PATH, path.c_str());
         libraryFolder = mf;
@@ -2863,6 +2889,7 @@ struct App {
     // Release everything this window owns (GL hosts, D2D). The audio tap is
     // global and outlives the windows.
     void Shutdown() {
+        if (controlsDialog) DestroyWindow(controlsDialog);
         if (presetDialog) DestroyWindow(presetDialog);
         rec.Stop();
         spout.Stop();
@@ -2885,6 +2912,7 @@ struct App {
 // Self-test harness (WaveScope.exe selftest): drives every engine on the demo
 // signal, dumps PNGs of what rendered, writes wavescope-selftest.log.
 #include "preset_browser.inl"
+#include "controls.inl"
 #include "selftest.inl"
 
 // One App per display, heap-allocated so the pointers stashed in each window
@@ -3046,11 +3074,39 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // must not change the visual, source or recorder behind the menu.
         if (a->deckMenu >= 0) {
             if (wp == VK_ESCAPE) a->deckMenu = -1;
+            else if (wp == VK_UP || wp == VK_DOWN || wp == VK_RETURN) {
+                int n = a->MenuCount(a->deckMenu);
+                if (wp == VK_RETURN) {
+                    if (a->menuFocus >= 0 && a->menuFocus < n && !a->MenuDisabled(a->deckMenu, a->menuFocus))
+                        a->MenuSelect(a->deckMenu, a->menuFocus);
+                    a->deckMenu = -1;
+                } else if (n > 0) {
+                    a->deckKeyboard = true;
+                    a->menuFocus = (a->menuFocus + (wp == VK_UP ? -1 : 1) + n) % n;
+                    int cols, perCol, pageSize, pages;
+                    float sc = a->UiScale(); auto sz = a->rt->GetSize();
+                    a->MenuMetrics(a->deckMenu, sz.width / sc, sz.height / sc, cols, perCol, pageSize, pages);
+                    a->menuPage = a->menuFocus / pageSize;
+                }
+            }
             else if ((wp == VK_LEFT || wp == VK_RIGHT) && a->rt) {
                 int cols, perCol, pageSize, pages;
                 float sc = a->UiScale(); D2D1_SIZE_F sz = a->rt->GetSize();
                 a->MenuMetrics(a->deckMenu, sz.width / sc, sz.height / sc, cols, perCol, pageSize, pages);
                 a->menuPage = Clampi(a->menuPage + (wp == VK_LEFT ? -1 : 1), 0, pages - 1);
+                a->menuFocus = (std::min)(a->MenuCount(a->deckMenu) - 1, a->menuPage * pageSize);
+            }
+            return 0;
+        }
+        if (wp == VK_TAB || (a->deckKeyboard && (wp == VK_LEFT || wp == VK_RIGHT || wp == VK_UP || wp == VK_DOWN || wp == VK_RETURN || wp == VK_SPACE || wp == VK_ESCAPE))) {
+            if (wp == VK_ESCAPE) { a->deckKeyboard = false; a->deckVisible = false; return 0; }
+            if (wp == VK_RETURN || wp == VK_SPACE) { if (a->deckFocus >= 0) a->DeckDispatch(a->deckFocus); return 0; }
+            int dir = wp == VK_LEFT || wp == VK_UP || (wp == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000)) ? -1 : 1;
+            a->deckKeyboard = true;
+            if (a->deckFocus < 0 && dir < 0) a->deckFocus = 0;
+            for (int i = 0; i < App::DK_N; ++i) {
+                a->deckFocus = (a->deckFocus + dir + App::DK_N) % App::DK_N;
+                if (!a->DeckHidden(a->deckFocus)) break;
             }
             return 0;
         }
@@ -3092,6 +3148,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case VK_F2:    a->OpenOptions(); break;
         case VK_F3:    a->OpenPresetBrowser(); break;
+        case VK_F4:    a->OpenControls(); break;
         case VK_F1:    a->help = !a->help; break;
         case VK_OEM_2: if (GetKeyState(VK_SHIFT) & 0x8000) a->help = !a->help; break; // '?'
         case VK_ESCAPE:

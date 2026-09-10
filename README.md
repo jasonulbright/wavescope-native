@@ -116,6 +116,9 @@ floor, e^-6dt decay). Same music, same numbers, both apps.
 | `E` | cycle engine (WaveScope → GPU → projectM) |
 | `G` | GPU shader engine |
 | `F3` | preset browser: search, favorites, and favorites-only shuffle |
+| `F4` | accessible native Controls window |
+| `Tab` / `Shift+Tab` | reveal and focus the on-screen deck; move between controls |
+| Arrows / `Enter` while the deck is focused | move focus / activate; `Esc` leaves deck focus |
 | `P` | cycle trace palette |
 | `N` | palettes + shuffle panel (include list, 3-stop editor) |
 | `1 2 3 4` | source: system / mic / demo / file picker |
@@ -147,6 +150,12 @@ engine AND visual every 30 s; VJ shuffle switches on the music itself — a
 bass drop hard-cuts, a long lull morphs.
 
 ## MilkDrop: morph, lab, VJ
+
+Use the deck's **pin** button or **F4 → Keep on-screen controls visible** to
+disable auto-hide; this preference is saved. F4 exposes the same actions and
+selectors through standard Windows buttons and combo boxes, with Tab,
+Shift+Tab, arrow-key navigation and accessible control names. Rendering
+continues while this window is open. Close it with Escape.
 
 Click the projectM/MILK preset picker or press **F3** for the native preset
 browser. Search filters filenames as you type; double-click a result or choose
