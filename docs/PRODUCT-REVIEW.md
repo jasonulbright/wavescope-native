@@ -7,7 +7,7 @@ limits are in [ADVERSARIAL-REVIEW.md](ADVERSARIAL-REVIEW.md).
 
 ## Fixes in the current source
 
-These changes are unreleased; v1.2.0 remains the published release.
+These changes ship in v1.2.1.
 
 | Problem | Result |
 | --- | --- |
@@ -24,7 +24,7 @@ build, so it reports the error without depending on a crash.
 
 ## First four priorities implemented
 
-Implemented in order, with one commit per feature. These remain unreleased.
+Implemented in order, with one commit per feature, for v1.2.1.
 
 | Priority | Result | Validation |
 | --- | --- | --- |
@@ -48,7 +48,7 @@ clipboard behavior; the automated editor test does not replace the user's clipbo
 
 - Put installation, first-launch help and app usage ahead of developer steps.
 - Explain silent demo mode, the bottom-edge gesture, Help/Options, and tray restore.
-- Distinguish the unreleased startup hint from the behavior in v1.2.0.
+- Identify v1.2.1 as the first release with the startup hint and four feature additions.
 - Lead with `wavescope-nebula.milk`; include the updated lab and a GPU Warp
   tunnel example. Capture from the native app without altering the visuals.
 - Clarify that library changes refresh the picker; external edits to the
