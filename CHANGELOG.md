@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.1 — 2026-09-10
 
 - Added an audio-file player (F5) with filename, elapsed/total time, pause,
   seeking, replay and a loop toggle. Ctrl+Space pauses/resumes; Space keeps

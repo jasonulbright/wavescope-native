@@ -66,11 +66,9 @@ portable copy until you have checked the migration.
 3. Press **F** for fullscreen, **F1** for the keymap, and **F2** for Spotify
    Options. **H** toggles the status display; mouse movement wakes it while enabled.
 
-The next release also shows the controls and a discovery hint for **15 seconds
-or until the first keypress** on launch. This is implemented in the current
-source; the published v1.2.0 build still requires the bottom-edge gesture.
-The search/favorites browser, pinned controls, native preset editor and audio
-player described below are also implemented for the next release.
+Starting with **v1.2.1**, the controls and a discovery hint appear for **15 seconds
+or until the first keypress** on launch. This release also adds the search/favorites
+browser, pinned controls, native preset editor and audio player described below.
 
 ![The launch hint explains how to reveal controls and open Help or Options](assets/screenshot-startup.png)
 
@@ -285,7 +283,7 @@ minimize hides to tray (and rendering fully stops while hidden).
 
 ## Product priorities
 
-The first four priorities are implemented in the current source: preset
+The first four priorities shipped in v1.2.1: preset
 search/favorites, keyboard navigation and pinned controls, native editor
 operations with unsaved-change protection, and audio-file playback controls.
 The [product review](docs/PRODUCT-REVIEW.md) records their scope and validation.
