@@ -24,7 +24,7 @@ function Get-Id([string]$value) {
     try { return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($value.ToLowerInvariant()))).Replace('-', '').Substring(0, 32) }
     finally { $sha.Dispose() }
 }
-function Escape-Xml([string]$value) { return [Security.SecurityElement]::Escape($value) }
+function ConvertTo-EscapedXml([string]$value) { return [Security.SecurityElement]::Escape($value) }
 $dirs = @{ '.' = 'INSTALLFOLDER' }
 $directoryXml = [Collections.Generic.List[string]]::new()
 $componentXml = [Collections.Generic.List[string]]::new()
@@ -38,14 +38,14 @@ foreach ($file in (Get-ChildItem -LiteralPath $Stage -Recurse -File | Sort-Objec
         $path = if ($parent -eq '.') { $parts[$i] } else { "$parent\$($parts[$i])" }
         if (!$dirs.ContainsKey($path)) {
             $id = 'D_' + (Get-Id $path)
-            $directoryXml.Add('<DirectoryRef Id="' + $dirs[$parent] + '"><Directory Id="' + $id + '" Name="' + (Escape-Xml $parts[$i]) + '" /></DirectoryRef>')
+            $directoryXml.Add('<DirectoryRef Id="' + $dirs[$parent] + '"><Directory Id="' + $id + '" Name="' + (ConvertTo-EscapedXml $parts[$i]) + '" /></DirectoryRef>')
             $dirs[$path] = $id
         }
         $parent = $path
     }
     $id = Get-Id $relative
     $guid = ([Guid]::ParseExact((Get-Id ('WaveScope/file/' + $relative)), 'N')).ToString()
-    $componentXml.Add('<Component Id="C_' + $id + '" Directory="' + $dirs[$parent] + '" Guid="' + $guid + '"><File Id="F_' + $id + '" Source="' + (Escape-Xml $file.FullName) + '" /><RegistryValue Root="HKCU" Key="Software\Signal Ridge Labs\WaveScope\Installer\Files" Name="' + $id + '" Type="integer" Value="1" KeyPath="yes" /></Component>')
+    $componentXml.Add('<Component Id="C_' + $id + '" Directory="' + $dirs[$parent] + '" Guid="' + $guid + '"><File Id="F_' + $id + '" Source="' + (ConvertTo-EscapedXml $file.FullName) + '" /><RegistryValue Root="HKCU" Key="Software\Signal Ridge Labs\WaveScope\Installer\Files" Name="' + $id + '" Type="integer" Value="1" KeyPath="yes" /></Component>')
 }
 # Remove only empty installed asset directories, never recursive user-data trees.
 foreach ($dir in $dirs.Keys | Where-Object { $_ -ne '.' } | Sort-Object) {
